@@ -1075,10 +1075,152 @@ def design_variant(d,tilt,columns):
     return replace(d,shape=shape,tilt=float(tilt),columns=int(columns))
 
 
-def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,floors=None,cache=None,stop=None,progress=None,air_mode='stop',amplitudes=None,laboratory=None,tilts=None,column_counts=None):
+# 최적화 프로세스는 첫 큰 탐색에서 만들고 재탐색 때 재사용한다.
+_OPTIMIZER_POOL=None
+_OPTIMIZER_CANCEL=None
+_OPTIMIZER_WORKERS=0
+from threading import Lock
+_OPTIMIZER_LOCK=Lock()
+
+
+def _initialize_design_worker(cancel):
+    global _DESIGN_CANCEL,_DESIGN_CONTEXT,_DESIGN_STATE
+    _DESIGN_CANCEL=cancel
+    _DESIGN_CONTEXT=None
+    _DESIGN_STATE=({},{},{})
+
+
+def _calculate_design_chunk(payload):
+    global _DESIGN_CONTEXT,_DESIGN_STATE
+    context,arguments,combinations=payload
+    if context!=_DESIGN_CONTEXT:
+        _DESIGN_STATE=({},{},{})
+        _DESIGN_CONTEXT=context
+    memo={}
+    _search_designs_serial(**arguments,cache=memo,stop=_DESIGN_CANCEL,
+        _combinations=combinations,_state=_DESIGN_STATE)
+    # 기준 건물 이력의 프로세스별 보관량을 제한한다.
+    baseline=_DESIGN_STATE[1]
+    while len(baseline)>8:baseline.pop(next(iter(baseline)))
+    return memo
+
+
+def _close_optimizer_pool():
+    global _OPTIMIZER_POOL,_OPTIMIZER_CANCEL,_OPTIMIZER_WORKERS
+    if _OPTIMIZER_CANCEL is not None:_OPTIMIZER_CANCEL.set()
+    if _OPTIMIZER_POOL is not None:
+        _OPTIMIZER_POOL.shutdown(wait=False,cancel_futures=True)
+    _OPTIMIZER_POOL=None
+    _OPTIMIZER_CANCEL=None
+    _OPTIMIZER_WORKERS=0
+
+
+def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,floors=None,
+        cache=None,stop=None,progress=None,air_mode='stop',amplitudes=None,laboratory=None,
+        tilts=None,column_counts=None,workers=None):
+    """같은 계산식을 후보별 독립 프로세스에 나눈다. workers=1이면 기존 순차 계산.
+    캐시가 있는 후보는 부모에서 재사용하고, 중지는 각 후보의 계산 경계에서 처리한다.
+    """
+    import os,hashlib,multiprocessing
+    from concurrent.futures import ProcessPoolExecutor,wait,FIRST_COMPLETED
+    from collections import Counter
+    arguments=dict(b=b,d=d,t=np.asarray(t),ag=np.asarray(ag),betas=list(betas),angles=list(angles),
+        lengths=list(lengths),require_peak=require_peak,ratios=None if ratios is None else list(ratios),
+        floors=None if floors is None else list(floors),air_mode=air_mode,
+        amplitudes=None if amplitudes is None else list(amplitudes),laboratory=laboratory,
+        tilts=None if tilts is None else list(tilts),column_counts=None if column_counts is None else list(column_counts))
+    combinations=list(itertools.product(arguments['betas'],arguments['angles'],arguments['lengths'],
+        [None] if arguments['ratios'] is None else arguments['ratios'],
+        [b.floor_data()[3]] if arguments['floors'] is None else arguments['floors'],
+        [None] if arguments['amplitudes'] is None else arguments['amplitudes'],
+        [d.tilt] if arguments['tilts'] is None else arguments['tilts'],
+        [d.columns] if arguments['column_counts'] is None else arguments['column_counts']))
+    count=len(combinations)
+    available=getattr(os,'process_cpu_count',os.cpu_count)() or 1
+    # 이력 배열의 합계 예산을 약 1 GiB로 잡는다. 프로세스·라이브러리 자체 메모리는 별도다.
+    memory_per_worker=max(1,8*len(t)*(32*len(b.floor_data()[0])+10*d.columns+128))
+    maximum=min(8,max(1,available-1),max(1,(1024**3)//memory_per_worker))
+    requested=maximum if workers is None else max(1,min(int(workers),maximum))
+    axes=(arguments['betas'],arguments['angles'],arguments['lengths'],arguments['ratios'] or [],arguments['floors'] or [],arguments['amplitudes'] or [],arguments['tilts'] or [],arguments['column_counts'] or [])
+    finite_inputs=all(value is None or np.isfinite(float(value)) for axis in axes for value in axis)
+    if count<16 or requested==1 or not finite_inputs or multiprocessing.current_process().name!='MainProcess':
+        if progress is not None:progress['workers']=1
+        return _search_designs_serial(**arguments,cache=cache,stop=stop,progress=progress)
+    if arguments['amplitudes'] is not None and any(x is not None for x in arguments['amplitudes']):
+        if laboratory is None or laboratory.get('wave')!='단방향' or laboratory.get('amplitude_mode')!='가속도 진폭 (g)':
+            raise ValueError('가속도 진폭 탐색에는 단방향 가속도 입력 조건이 필요합니다.')
+    input_key=hashlib.sha256(arguments['t'].tobytes()+arguments['ag'].tobytes()+repr(laboratory).encode()).digest()
+    def key_for(combination):
+        beta,angle,B,ratio,floor,amplitude,tilt,columns=combination
+        return (float(beta),float(angle),float(B),None if ratio is None else float(ratio),float(floor),
+            amplitude,air_mode,input_key,float(tilt),float(columns))
+    keys=[key_for(c) for c in combinations]
+    memo={} if cache is None else cache
+    answers={key:dict(memo[key]) for key in keys if key in memo}
+    reused=sum(key in answers for key in keys)
+    completed=reused
+    multiplicity=Counter(keys)
+    missing=[c for c,key in zip(combinations,keys) if key not in answers]
+    def report():
+        if progress is not None:progress.update(total=count,completed=completed,reused=reused,workers=requested)
+    report()
+    if missing and not (stop is not None and stop.is_set()):
+        global _OPTIMIZER_POOL,_OPTIMIZER_CANCEL,_OPTIMIZER_WORKERS
+        with _OPTIMIZER_LOCK:
+            try:
+                if _OPTIMIZER_POOL is not None and _OPTIMIZER_WORKERS!=requested:_close_optimizer_pool()
+                if _OPTIMIZER_POOL is None:
+                    # 작은 행렬마다 BLAS 스레드가 추가 생성되는 중첩 병렬화를 방지한다.
+                    for name in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS'):
+                        os.environ[name]='1'
+                    ctx=multiprocessing.get_context('spawn')
+                    _OPTIMIZER_CANCEL=ctx.Event()
+                    _OPTIMIZER_POOL=ProcessPoolExecutor(max_workers=requested,mp_context=ctx,
+                        initializer=_initialize_design_worker,initargs=(_OPTIMIZER_CANCEL,))
+                    _OPTIMIZER_WORKERS=requested
+                _OPTIMIZER_CANCEL.clear()
+                # 같은 관 치수가 이웃한 작업에 묶이도록 정렬한다.
+                missing.sort(key=lambda c:tuple(-1. if c[i] is None else float(c[i]) for i in (2,3,6,7,4,5,0,1)))
+                chunk_size=max(1,min(8,(len(missing)+requested*4-1)//(requested*4)))
+                chunks=iter([missing[i:i+chunk_size] for i in range(0,len(missing),chunk_size)])
+                context=hashlib.sha256(input_key+repr((b,d)).encode()).digest()
+                pending=set();exhausted=False
+                while pending or not exhausted:
+                    cancelled=stop is not None and stop.is_set()
+                    if cancelled:
+                        _OPTIMIZER_CANCEL.set();exhausted=True
+                    while not exhausted and len(pending)<requested*2:
+                        chunk=next(chunks,None)
+                        if chunk is None:exhausted=True;break
+                        pending.add(_OPTIMIZER_POOL.submit(_calculate_design_chunk,(context,arguments,chunk)))
+                    if not pending:break
+                    ready,pending=wait(pending,timeout=.05,return_when=FIRST_COMPLETED)
+                    for future in ready:
+                        updates=future.result()
+                        completed+=sum(multiplicity[key] for key in updates if key not in answers)
+                        memo.update(updates);answers.update(updates)
+                    report()
+            except Exception as error:
+                # 완료한 후보는 보존하고 프로세스 시작/실행 실패 시 나머지만 순차 계산한다.
+                _close_optimizer_pool()
+                if progress is not None:
+                    progress.update(workers=1,parallel_note='병렬 작업 오류로 순차 계산 계속: '+str(error)[:160])
+                if stop is None or not stop.is_set():
+                    return _search_designs_serial(**arguments,cache=memo,stop=stop,progress=progress)
+    rows=[]
+    for key in keys:
+        if key not in answers:continue
+        row=dict(answers[key])
+        row['eligible']=air_mode!='off' and row['rms_pct'] is not None and row['peak_pct'] is not None and (not require_peak or row['peak_pct']>=-1e-8)
+        rows.append(row)
+    return sorted(rows,key=lambda row:(row['eligible'],row['rms_pct'] if row['rms_pct'] is not None else -np.inf),reverse=True)
+
+
+def _search_designs_serial(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,floors=None,cache=None,stop=None,progress=None,air_mode='stop',amplitudes=None,laboratory=None,tilts=None,column_counts=None,_combinations=None,_state=None):
     tilts=[d.tilt] if tilts is None else list(tilts)
     column_counts=[d.columns] if column_counts is None else list(column_counts)
-    rows=[];trial_cache={};baseline_cache={};signals={}
+    rows=[]
+    trial_cache,baseline_cache,signals=({},{},{}) if _state is None else _state
     amplitudes=[None] if amplitudes is None else list(amplitudes)
     if any(x is not None for x in amplitudes) and (laboratory is None or laboratory.get('wave')!='단방향' or laboratory.get('amplitude_mode')!='가속도 진폭 (g)'):
         raise ValueError('가속도 진폭 탐색에는 단방향 가속도 입력 조건이 필요합니다.')
@@ -1086,11 +1228,13 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
     input_key=hashlib.sha256(np.asarray(t).tobytes()+np.asarray(ag).tobytes()+repr(laboratory).encode()).digest()
     reused=0
     total=len(betas)*len(angles)*len(lengths)*(1 if ratios is None else len(ratios))*(1 if floors is None else len(floors))*len(amplitudes)*len(tilts)*len(column_counts)
+    if _combinations is not None:total=len(_combinations)
     def report():
         if progress is not None:progress.update(total=total,completed=len(rows),reused=reused)
     report()
-    for beta,angle,B,ratio,floor,amplitude,tilt,columns in itertools.product(betas,angles,lengths,
-            [None] if ratios is None else ratios,[b.floor_data()[3]] if floors is None else floors,amplitudes,tilts,column_counts):
+    combinations=itertools.product(betas,angles,lengths,
+        [None] if ratios is None else ratios,[b.floor_data()[3]] if floors is None else floors,amplitudes,tilts,column_counts) if _combinations is None else _combinations
+    for beta,angle,B,ratio,floor,amplitude,tilt,columns in combinations:
         if stop is not None and stop.is_set():break
         key=(float(beta),float(angle),float(B),None if ratio is None else float(ratio),float(floor),amplitude,air_mode,input_key,float(tilt),float(columns))
         # cache는 동일 건물·장치·가진을 고정한 한 탐색 창에서만 공유한다.
@@ -1158,6 +1302,177 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
         row['eligible']=air_mode!='off' and row['rms_pct'] is not None and row['peak_pct'] is not None and (not require_peak or row['peak_pct']>=-1e-8)
         rows.append(row);report()
     return sorted(rows,key=lambda r:(r['eligible'],r['rms_pct'] if r['rms_pct'] is not None else -np.inf),reverse=True)
+
+def export_optimizer_report(path,results,context):
+    """고정 조건을 한 번 표시하고 실제 탐색변수만 RMS 순위표에 내보낸다."""
+    import os,tempfile
+    path=Path(path).with_suffix('.csv')
+    labels={'r':'조율비 r','beta':'오리피스 개구비 β','angle':'설치 방향 각도 (°)',
+        'B':'수평 관 길이 B (m)','n':'설치 층','tilt':'기둥 기울기 (°)','columns':'기둥 수'}
+    grids=context.get('grids',{})
+    varied=[key for key in labels if len(set(grids.get(key,[])))>1]
+    finite=lambda row:row.get('rms_pct') is not None and np.isfinite(row['rms_pct'])
+    ranked=sorted(results,key=lambda row:(finite(row),row['rms_pct'] if finite(row) else -np.inf),reverse=True)
+    if not ranked:raise ValueError('저장할 계산 결과가 없습니다.')
+    def text(value):
+        if isinstance(value,(list,tuple)):return ', '.join(text(v) for v in value)
+        if isinstance(value,(float,np.floating)):return f'{value:.8g}'
+        return str(value)
+    building=context.get('building',{});damper=context.get('damper',{});source=context.get('source_metadata',{})
+    model=Building(**building) if building else None
+    device=Damper(**damper) if damper else None
+    planned=int(np.prod([len(values) for values in grids.values()])) if grids else len(results)
+    conditions=[('정렬 기준','RMS 지붕 상대변위 저감률 내림차순 · 양수는 저감, 음수는 응답 증가'),
+        ('결과 수',f"평가한 설계 {len(results)} / 계획 {planned}개 · 중지된 탐색 여부: {'예' if context.get('stopped') else '아니오'}"),
+        ('가진 조건',context.get('source','')),
+        ('평가 시간 (s)',context.get('duration_s','')),
+        ('수면 처리',AIR_MODE_LABELS.get(context.get('air_mode'),context.get('air_mode',''))),
+        ('최적 선정 조건','최대 변위 악화 제외' if context.get('require_peak') else '최대 변위 악화 허용')]
+    if model is not None:
+        masses,kx,heights,_=model.floor_data()
+        conditions.extend([('건물 층수',len(masses)),('층별 질량 (kg)',text(masses.tolist())),
+            ('X방향 층별 강성 (N/m)',text(kx.tolist())),
+            ('Y방향 층별 강성 (N/m)',text(model.stories_y or tuple(kx))),
+            ('층별 높이 (m)',text(heights.tolist())),
+            ('건물 감쇠',model.damping_mode if model.damping_mode=='직접 계수' else f'{model.damping_mode} · 입력 감쇠비 {100*model.damping:g}%' ),
+            ('건물 가로·세로 (m)',f'{model.width:g} × {model.depth:g}')])
+        if model.damping_mode=='직접 계수':
+            conditions.extend([('X 층간 감쇠계수 (N·s/m)',text(model.story_c)),('Y 층간 감쇠계수 (N·s/m)',text(model.story_cy or model.story_c))])
+    if device is not None:
+        conditions.extend([('관 형상',SHAPE_DISPLAY.get(device.shape,'기울인 U형 (V형)')),
+            ('액체 질량 (kg)',ranked[0].get('mass_kg',device.mass)),
+            ('추가 관 손실계수 (입력)',device.pipe_loss),
+            ('관 끝 길이 (m)','자동 계산' if device.leg_length is None else device.leg_length)])
+        if device.tops:conditions.append(('기둥별 관 끝 높이 (m)',text(device.tops)))
+        elif device.leg_length is None:conditions.append(('정지 수면 위 여유 (m)',device.freeboard))
+        if device.xi is not None:conditions.append(('직접 손실계수 ξ',f'{device.xi:g} · '+('총손실' if device.xi_scope=='total' else '국부손실')))
+    if source.get('wave')=='단방향':
+        conditions.extend([('가진 진동수 (Hz)',source.get('harmonic_hz','')),
+            ('입력 진폭',f"{text(source.get('amplitude_value',''))} · {source.get('amplitude_mode','')}"),
+            ('실제 최대가속도 (g)',ranked[0].get('actual_peak_g')),
+            ('가진 주기 수',source.get('cycles','')),
+            ('시작·종료 램프 (s)',f"{text(source.get('ramp_start_s',0))} / {text(source.get('ramp_end_s',0))} · {source.get('ramp_profile','')}")])
+    for key,label in labels.items():
+        values=grids.get(key,[])
+        if not values:continue
+        if key=='columns' and device is not None and device.shape not in ('다기둥형','피자 거치대'):
+            conditions.append(('기둥 수',2));continue
+        if key in varied:
+            step=values[1]-values[0]
+            conditions.append((label+' 탐색 범위',f'{text(values[0])} ~ {text(values[-1])} · 간격 {text(step)} · {len(values)}개'))
+        else:conditions.append((label+' (고정)',values[0]))
+    conditions.append(('물높이·안지름','조율비·관 길이 등에 따라 물 질량을 유지하도록 자동 계산'))
+    columns=[('rank','RMS 순위')]+[(key,labels[key]) for key in varied]+[
+        ('rms_pct','RMS 변위 저감률 (%)'),('peak_pct','최대 변위 저감률 (%)'),
+        ('eligible','최적 선정 가능'),('status','계산 상태')]
+    if any(row.get('failure_time_s') is not None or row.get('reason') for row in ranked):
+        columns.extend([('failure_time_s','중단 시각 (s)'),('completion_pct','계산 완료율 (%)'),('reason','중단·제외 원인')])
+    table=[['TLCD 최적 설계 탐색 결과'],[],['고정 조건·탐색 범위','값']]
+    table.extend([[label,value] for label,value in conditions]);table.append([])
+    header_row=len(table)+1
+    table.append([label for key,label in columns])
+    number=0
+    for row in ranked:
+        if finite(row):number+=1
+        entry=[]
+        for key,label in columns:
+            value=number if key=='rank' and finite(row) else '' if key=='rank' else row.get(key)
+            if key=='eligible':value='가능' if value else '제외'
+            if isinstance(value,(float,np.floating)) and not np.isfinite(value):value=None
+            entry.append(value)
+        table.append(entry)
+    excel=path.with_suffix('.xlsx');temporary=[]
+    try:
+        for destination in (path,excel):
+            with tempfile.NamedTemporaryFile(dir=destination.parent,prefix=destination.stem+'_',suffix='.tmp',delete=False) as stream:
+                temporary.append(Path(stream.name))
+        with temporary[0].open('w',newline='',encoding='utf-8-sig') as stream:
+            writer=csv.writer(stream)
+            for row in table:
+                writer.writerow([f'{value:.8g}' if isinstance(value,(float,np.floating)) else value for value in row])
+        _write_optimizer_xlsx(temporary[1],table,header_row,columns)
+        os.replace(temporary[0],path)
+        os.replace(temporary[1],excel)
+    finally:
+        for item in temporary:item.unlink(missing_ok=True)
+    return path,excel
+
+
+def _write_optimizer_xlsx(path,table,header_row,columns):
+    """추가 패키지 없이 한국어·열 너비·필터를 갖춘 간단한 Excel 파일을 저장한다."""
+    import zipfile
+    from xml.etree.ElementTree import Element,SubElement,tostring
+    ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    def element(name,**attributes):return Element(name,attributes)
+    def column_name(number):
+        result=''
+        while number:
+            number,remainder=divmod(number-1,26);result=chr(65+remainder)+result
+        return result
+    width=len(columns);last=column_name(width)
+    sheet=element('worksheet',xmlns=ns)
+    views=SubElement(sheet,'sheetViews');view=SubElement(views,'sheetView',workbookViewId='0',zoomScale='85')
+    SubElement(view,'pane',ySplit='1',topLeftCell='A2',activePane='bottomLeft',state='frozen')
+    layout=SubElement(sheet,'cols')
+    for index,(key,label) in enumerate(columns,1):
+        size=12 if key=='rank' else 65 if key=='reason' else 30 if key=='status' else 26 if key in ('rms_pct','peak_pct','eligible') else 23
+        SubElement(layout,'col',min=str(index),max=str(index),width=str(size),customWidth='1')
+    data=SubElement(sheet,'sheetData');merged=[]
+    for index,values in enumerate(table,1):
+        title=index==1;header=index in (3,header_row);fixed=3<index<header_row-1
+        row=SubElement(data,'row',r=str(index),ht=str(32 if title else 38 if header or fixed else 26),customHeight='1')
+        if title:merged.append(f'A{index}:{last}{index}')
+        if index==3 or fixed:
+            merged.extend([f'A{index}:B{index}',f'C{index}:{last}{index}'])
+        for col,value in enumerate(values,1):
+            position=3 if (index==3 or fixed) and col==2 else col
+            style='1' if title or header else '2' if fixed and col==1 else '3' if fixed else '4'
+            if index>header_row and columns[col-1][0] in ('rms_pct','peak_pct'):style='5'
+            cell=SubElement(row,'c',r=column_name(position)+str(index),s=style)
+            if value is None:continue
+            if isinstance(value,(int,float,np.integer,np.floating)):
+                SubElement(cell,'v').text=f'{value:.12g}'
+            else:
+                cell.set('t','inlineStr');text=SubElement(SubElement(cell,'is'),'t')
+                text.set('{http://www.w3.org/XML/1998/namespace}space','preserve');text.text=str(value)
+    SubElement(sheet,'autoFilter',ref=f'A{header_row}:{last}{len(table)}')
+    merges=SubElement(sheet,'mergeCells',count=str(len(merged)))
+    for region in merged:SubElement(merges,'mergeCell',ref=region)
+    styles=element('styleSheet',xmlns=ns)
+    formats=SubElement(styles,'numFmts',count='1');SubElement(formats,'numFmt',numFmtId='164',formatCode='0.########')
+    fonts=SubElement(styles,'fonts',count='2')
+    for bold in (False,True):
+        font=SubElement(fonts,'font');SubElement(font,'sz',val='11');SubElement(font,'name',val='맑은 고딕')
+        if bold:SubElement(font,'b');SubElement(font,'color',rgb='FFFFFFFF')
+    fills=SubElement(styles,'fills',count='4')
+    for pattern,color in [('none',None),('gray125',None),('solid','FF244C66'),('solid','FFE8F0F5')]:
+        fill=SubElement(SubElement(fills,'fill'),'patternFill',patternType=pattern)
+        if color:SubElement(fill,'fgColor',rgb=color);SubElement(fill,'bgColor',indexed='64')
+    borders=SubElement(styles,'borders',count='1');border=SubElement(borders,'border')
+    for side in ('left','right','top','bottom','diagonal'):SubElement(border,side)
+    base=SubElement(styles,'cellStyleXfs',count='1');SubElement(base,'xf',numFmtId='0',fontId='0',fillId='0',borderId='0')
+    cells=SubElement(styles,'cellXfs',count='6')
+    for number,(font,fill,format_id) in enumerate([(0,0,0),(1,2,0),(0,3,0),(0,0,0),(0,0,164),(0,0,2)]):
+        cell=SubElement(cells,'xf',numFmtId=str(format_id),fontId=str(font),fillId=str(fill),borderId='0',xfId='0',applyAlignment='1')
+        SubElement(cell,'alignment',vertical='center',horizontal='left' if number in (1,2,3) else 'center',wrapText='1')
+    named=SubElement(styles,'cellStyles',count='1');SubElement(named,'cellStyle',name='Normal',xfId='0',builtinId='0')
+    workbook=element('workbook',xmlns=ns);workbook.set('xmlns:r','http://schemas.openxmlformats.org/officeDocument/2006/relationships')
+    sheets=SubElement(workbook,'sheets');SubElement(sheets,'sheet',name='최적 설계 결과',sheetId='1',attrib={'r:id':'rId1'})
+    content='http://schemas.openxmlformats.org/package/2006/content-types'
+    types=element('Types',xmlns=content)
+    for ext,mime in [('rels','application/vnd.openxmlformats-package.relationships+xml'),('xml','application/xml')]:SubElement(types,'Default',Extension=ext,ContentType=mime)
+    for part,kind in [('workbook','sheet.main'),('worksheets/sheet1','worksheet'),('styles','styles')]:
+        SubElement(types,'Override',PartName='/xl/'+part+'.xml',ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.'+kind+'+xml')
+    relns='http://schemas.openxmlformats.org/package/2006/relationships'
+    root_rel=element('Relationships',xmlns=relns)
+    SubElement(root_rel,'Relationship',Id='rId1',Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument',Target='xl/workbook.xml')
+    book_rel=element('Relationships',xmlns=relns)
+    for ident,target,kind in [('rId1','worksheets/sheet1.xml','worksheet'),('rId2','styles.xml','styles')]:
+        SubElement(book_rel,'Relationship',Id=ident,Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/'+kind,Target=target)
+    with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_DEFLATED) as archive:
+        for name,tree in [('[Content_Types].xml',types),('_rels/.rels',root_rel),('xl/workbook.xml',workbook),('xl/_rels/workbook.xml.rels',book_rel),('xl/styles.xml',styles),('xl/worksheets/sheet1.xml',sheet)]:
+            archive.writestr(name,tostring(tree,encoding='utf-8',xml_declaration=True))
+
 
 def quick_verify_best(b,d,t,ag,rows,air_mode='stop',stop=None,memo=None):
     """선정 가능 1위 한 개만 내부 간격 1/2로 확인한다. 추가 예산 1초, 원래 점수는 보존.
@@ -3572,7 +3887,7 @@ def lab(b,d,t,ag,title,out):
             def monitor():
                 if not win.winfo_exists() or not run_state['running']:return
                 p=run_state['progress']
-                progress_text.set(f"완료 {p.get('completed',0)} / {p.get('total',0)} · 캐시 재사용 {p.get('reused',0)}"+(' · 중지 요청됨' if run_state['cancel'].is_set() else ''))
+                progress_text.set(f"완료 {p.get('completed',0)} / {p.get('total',0)} · 캐시 재사용 {p.get('reused',0)} · CPU 작업 {p.get('workers',1)}개"+(' · 중지 요청됨' if run_state['cancel'].is_set() else '')+(' · '+p['parallel_note'] if p.get('parallel_note') else ''))
                 if run_state['running']:win.after(100,monitor)
             monitor()
             def compute():
@@ -3598,7 +3913,7 @@ def lab(b,d,t,ag,title,out):
                 if win.winfo_exists():
                     draw(rows)
                     p=run_state['progress']
-                    progress_text.set(f"{'중지됨' if context['stopped'] else '완료'} · 평가 {len(rows)} / {p.get('total',0)} · 캐시 {p.get('reused',0)} · 미계산 {p.get('total',0)-len(rows)}")
+                    progress_text.set(f"{'중지됨' if context['stopped'] else '완료'} · 평가 {len(rows)} / {p.get('total',0)} · 캐시 {p.get('reused',0)} · CPU 작업 {p.get('workers',1)}개 · 미계산 {p.get('total',0)-len(rows)}")
             # 계산은 백그라운드에서, 결과 표시와 입력 잠금 해제는 Tkinter 메인 스레드에서 수행한다.
             task(compute,display,on_finish=unlock_inputs)
         def swap():
@@ -3625,13 +3940,17 @@ def lab(b,d,t,ag,title,out):
             if not results:return
             path=filedialog.asksaveasfilename(parent=win,defaultextension='.csv')
             if path:
-                with open(path,'w',newline='',encoding='utf-8-sig') as f:
-                    writer=csv.DictWriter(f,fieldnames=[*results[0],'calculation_context']);writer.writeheader();writer.writerows(dict(row,calculation_context=json.dumps(run_state['context'],ensure_ascii=False)) for row in results)
+                try:
+                    csv_path,excel_path=export_optimizer_report(path,results,run_state['context'])
+                except (OSError,ValueError) as error:
+                    messagebox.showerror('결과 저장',f'저장하지 못했습니다. 같은 이름의 Excel 파일이 열려 있으면 닫고 다시 저장하세요.\n{error}\nCSV가 먼저 저장됐을 수 있습니다.',parent=win)
+                    return
+                feedback.set(f'저장 완료 · {csv_path.name} / {excel_path.name} (열 너비 적용)')
         def save_png():
             path=filedialog.asksaveasfilename(parent=win,defaultextension='.png',filetypes=[('PNG','*.png')])
             if path:fig.savefig(path,dpi=300,bbox_inches='tight')
         buttons=ttk.Frame(controls);buttons.grid(row=len(keys)+1,column=0,columnspan=5)
-        for label,command in [('계산 / 지도 갱신',start),('축 교환',swap),('최적점 주변 정밀 탐색',refine),('CSV 저장',save_csv),('PNG 300 dpi 저장',save_png)]:
+        for label,command in [('계산 / 지도 갱신',start),('축 교환',swap),('최적점 주변 정밀 탐색',refine),('CSV·Excel 저장',save_csv),('PNG 300 dpi 저장',save_png)]:
             ttk.Button(buttons,text=label,command=command).pack(side='left')
         stop_button=ttk.Button(buttons,text='중지',command=cancel_search,state='disabled');stop_button.pack(side='left')
         for group in values.values():
@@ -4287,7 +4606,9 @@ def lab(b,d,t,ag,title,out):
     if saved.get('last'):root.after(100,lambda:restore(saved['last']))
     root.protocol('WM_DELETE_WINDOW',root.destroy)
     try: root.mainloop()
-    finally: pool.shutdown(wait=False,cancel_futures=True)
+    finally:
+        _close_optimizer_pool()
+        pool.shutdown(wait=False,cancel_futures=True)
 
 
 def floor_force(time):
@@ -4884,4 +5205,6 @@ def main():
 
 
 if __name__=='__main__':
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
