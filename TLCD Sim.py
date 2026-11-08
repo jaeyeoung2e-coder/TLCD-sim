@@ -2118,19 +2118,22 @@ STABLE_TUNING_RATIO = .98   # 안정 예제에서만 사용하는 조율비
 
 def stable_example():
     """넓은 탐색 범위를 위한 2층 교육용 예제. 실제 제작·구조 안전성 판정용이 아니다.
-    목표 범위 r=.9~1, beta=.2~.8, B=.1~1 m, 기둥 기울기 45~90°, 설치 방향 0~60°.
+    목표 범위 r=.9~1, beta=.2~.8, B=.1~.7 m, 기둥 기울기 45~90°, 설치 방향 0~60°.
     기본 가진은 0.35 Hz·0.01 g·39주기·시작/종료 3주기 quintic 램프다.
-    h는 물량 파라미터이며 긴 관이 필요하다. 다른 가진·평가 시간의 완료 여부는 별도 계산한다.
+    외형은 가로 6 m·세로 5 m·층고 3.2 m의 2층 건물이다. 질량·강성은 교육용 실험값이다.
+    수면 위 여유 0.349 m: B=.7 m의 대표 113개 조합에서 약 5% 중단을 목표로 선정했다.
+    중단 비율은 가진과 탐색 격자에 따라 달라진다.
+    h는 물량 파라미터이다. 다른 가진·평가 시간의 완료 여부는 별도 계산한다.
     """
     building=Building(mass=20.,damping=.25,masses=(10.,10.),stories=(1.,1.),
-        stories_y=(1.,1.),heights=(.3,.3),mount=2,width=1.2,depth=1.2)
+        stories_y=(1.,1.),heights=(3.2,3.2),mount=2,width=6.,depth=5.)
     stiffness=(.35/tuning_frequency(building))**2
     building=replace(building,stories=(stiffness,stiffness),stories_y=(stiffness,stiffness),frequency=.35)
     B=.3
     length=2*G/(2*np.pi*STABLE_TUNING_RATIO*building.frequency)**2
     area=.29452/(1000*length)
     return building,Damper(B=B,h=(length-B)/2,diameter=math.sqrt(4*area/np.pi),
-        freeboard=.75,beta=.5,pipe_loss=0.)
+        freeboard=.349,beta=.5,pipe_loss=0.)
 
 
 def read_settings(path):
@@ -3328,7 +3331,7 @@ def lab(b,d,t,ag,title,out):
         ttk.Label(body,text=f'조율 기준 · 세계 X방향 1차 {tuning_frequency(model):.5g} Hz / 총 물 질량 {dam.mass:.5g} kg 고정').pack(anchor='w')
         controls=ttk.Frame(body);controls.pack(fill='x')
         field_widgets={};values={};fixed={};defaults={'r':(.8,1.2,.1),'beta':(.2,.8,.15),'angle':(0,90,45),
-            'B':(dam.B*.8,dam.B*1.2,dam.B*.2),'n':(1,len(model.floor_data()[0]),1),'tilt':(60.,90.,15.),'columns':(2,6,1)}
+            'B':(.1,.7,.2),'n':(1,len(model.floor_data()[0]),1),'tilt':(60.,90.,15.),'columns':(2,6,1)}
         initial={'r':dam.frequency/tuning_frequency(model),'beta':dam.beta,'angle':dam.angle,'B':dam.B,'n':model.floor_data()[3],'tilt':dam.tilt,'columns':dam.columns}
         for col,text in enumerate(['변수','시작','끝','간격','고정값']):
             ttk.Label(controls,text=text).grid(row=0,column=col)
