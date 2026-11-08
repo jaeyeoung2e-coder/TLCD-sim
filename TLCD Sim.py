@@ -1277,6 +1277,21 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
         failure=float(t[0]);failure_kind='모델 적용 범위 초과'
         failure_detail=f'초기 상태 · 기둥 1·2 · h={d.h*1000:.3f} mm, 수평관 천장 D/2={d.diameter*500:.3f} mm. 전단면 충수를 보장할 수 없어 공기 유입 가능 상태의 유체 계산 제한.'
 
+    # 단일 유로 물 모델에서는 중점법의 선형 부분을 한 번의 행렬곱으로 묶는다.
+    fast_water=installed and modes==1 and len(weights)==1 and not wall_coefficient and not slug
+    if fast_water:
+        dimension=len(active)
+        packed=np.zeros(2*dimension)
+        slopes=S[:,0]
+        upper=np.broadcast_to(clearance,slopes.shape)
+        lower_y=-np.inf
+        upper_y=np.inf
+        for slope,low,high in zip(slopes,lower_rise,upper):
+            if slope:
+                left,right=sorted((low/slope,high/slope))
+                lower_y=max(lower_y,left)
+                upper_y=min(upper_y,right)
+        if mode=='off':lower_y,upper_y=-np.inf,np.inf
     # 출력 기록의 각 구간을 내부 안정 간격으로 다시 나누고 ag는 선형 보간한다.
     for i,span in enumerate(np.diff(t),1):
         if failure is not None:break
@@ -1298,6 +1313,32 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
                 hinv=h*inv
                 slug_fluid_correction=hinv[:,-1]
                 slug_building_correction=(hinv[:,attach0]*cross0+hinv[:,attach1]*cross1)/d.B
+            if fast_water:
+                eye=np.eye(dimension)
+                transition=np.block([[eye+dt*qm,dt*vm],[2*qm,2*vm-eye]])
+                ground_step=np.r_[dt*force,2*force]
+                drag_step=np.r_[dt*scalar_drag,2*scalar_drag]
+                flow_row=scalar_path*np.r_[qm[-1],vm[-1]]
+                flow_ground=scalar_path*force[-1]
+        if fast_water:
+            initial=packed
+            for j in range(count):
+                gm=ag[i-1]+(ag[i]-ag[i-1])*(j+.5)/count
+                rhs=flow_row@packed+flow_ground*gm
+                velocity=2*rhs/(1+math.sqrt(1+4*scalar_coefficient*abs(rhs)))
+                packed=transition@packed+ground_step*gm-drag_step*(abs(velocity)*velocity)
+                if not lower_y<packed[dimension-1]<upper_y:
+                    # 경계가 걸린 표본 구간만 기존 사건 보간 루틴으로 다시 계산한다.
+                    packed=initial
+                    break
+            else:
+                internal_steps+=count
+                q[active]=packed[:dimension]
+                v[active]=packed[dimension:]
+                Q[i]=q
+                V[i]=v
+                nvalid+=1
+                continue
         for j in range(count):
             internal_steps+=1
             # 입력 기록 두 표본 사이의 중간 시각 가속도. 단위는 m/s²이다.
@@ -1367,8 +1408,10 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
                 nvalid=i+1
                 break
         if failure is not None:break
+        if fast_water:packed=np.r_[q[active],v[active]]
         Q[i]=q;V[i]=v;nvalid+=1
     # 이 아래는 TLCD 중단과 무관하게 원래 입력 끝까지 맨건물·고정질량 건물을 계산한다.
+    baseline_steps=np.maximum(1,np.ceil(np.diff(original_t)/stepmax-1e-10)).astype(np.int64)
     baseline_blocks=[]
     for indices in (np.r_[np.arange(2*n,3*n),np.arange(4*n,5*n)],
                     np.r_[np.arange(3*n,4*n),np.arange(5*n,6*n)]):
@@ -1377,7 +1420,7 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
         # 비교 대상도 TLCD와 같은 내부 시간 간격으로 적분한다.
         # 다른 간격의 기준 응답을 재사용하면 저감률에 수치 오차가 섞인다.
         # 질량·강성·감쇠·내부 간격이 같을 때만 비교 건물 결과를 재사용한다.
-        cache_key=(mb.tobytes(),kb.tobytes(),cb.tobytes(),stepmax,excitation_key)
+        cache_key=(mb.tobytes(),kb.tobytes(),cb.tobytes(),baseline_steps.tobytes(),excitation_key)
         stored=baseline_cache.get(cache_key) if baseline_cache is not None else None
         if stored is None:
             influence=np.r_[np.ones(n),np.zeros(n)]
