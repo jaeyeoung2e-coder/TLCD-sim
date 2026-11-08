@@ -1599,15 +1599,20 @@ def tanveer_known_conditions():
         source='https://doi.org/10.1371/journal.pone.0224436')
 
 
+STABLE_TUNING_RATIO = .98   # 안정 예제에서만 사용하는 조율비
+
 def stable_example():
-    """실행·조작 확인용 선형 예제. 실제 건물의 안전성 보증용 설계가 아니다."""
-    building=Building(mass=20.,damping=.05,masses=(10.,10.),stories=(1800.,1800.),
+    """실행·조작 확인용 권장 예제. 실제 건물의 안전성 보증용 설계가 아니다.
+
+    2층 모형(각 10 kg, 층강성 1800 N/m, 1차 약 1.32 Hz, 감쇠비 2%)에 조율비 0.98로 맞춘 U형 TLCD.
+    B 16 cm, 안지름 4 cm, 물 약 0.37 kg(질량비 약 1.9%), β 0.5 + 첨부 예제에서 명시한 추가 손실 2.4(이 예제에만 적용).
+    정밀 모드에서 공진 사인(0.01 g, 39회, quintic 3주기 램프)·엘센트로·고베·멕시코시티 모두 끝까지 계산되며
+    물 변화는 최대 약 4 cm로 수평관 천장 한계(약 4.9 cm) 안이다. 건물 진동수 ±10%에서도 유효하다."""
+    building=Building(mass=20.,damping=.02,masses=(10.,10.),stories=(1800.,1800.),
         stories_y=(1800.,1800.),heights=(.3,.3),mount=2)
     building=replace(building,frequency=tuning_frequency(building))
-    old=Damper(B=.2,h=.2,diameter=.025,freeboard=.12,beta=.4)
-    L=2*G/(.98*2*np.pi*building.frequency)**2
-    diameter=math.sqrt(4*old.mass/(old.rho*np.pi*L))
-    return building,replace(old,h=(L-old.B)/2,diameter=diameter)
+    B=.16;omega=2*np.pi*STABLE_TUNING_RATIO*building.frequency;L=2*G/omega**2
+    return building,Damper(B=B,h=(L-B)/2,diameter=.04,freeboard=.12,beta=.5,pipe_loss=2.4)
 
 
 def read_settings(path):
@@ -2774,16 +2779,16 @@ def lab(b,d,t,ag,title,out):
         viewport.bind('<Configure>',lambda event:viewport.itemconfigure(body_id,width=event.width))
 
         ttk.Label(body,text='다중 물기둥 형상의 r은 최저 유체모드 기준 · 단면을 함께 조정하여 물 질량 유지').pack(anchor='w')
-        labels={'r':'조율비 r','beta':'개구비 β','angle':'설치 각도 θ (°)','B':'수평 길이 B (m)','n':'설치 층 n','mu_ref':'기준 점도 μ_ref (Pa·s)','flow_index':'유동지수 n','amplitude_g':'가속도 진폭 (g)'}
+        labels={'r':'조율비 r','beta':'개구비 β','angle':'설치 각도 θ (°)','B':'수평 길이 B (m)','n':'설치 층 n','mu_ref':'기준 점도 μ_ref (Pa·s)','flow_index':'유동지수 n'}
         keys=list(labels)
-        selectable=[key for key in keys if not (key=='amplitude_g' and not amplitude_enabled) and not (key=='beta' and dam.xi is not None) and not (key in ('mu_ref','flow_index') and (dam.fluid_model=='물' or (dam.xi is not None and dam.xi_scope=='total')))]
-        ttk.Label(body,text=('진폭 탐색: 주 실험실과 동일한 Hz·램프를 사용합니다. 입력 진폭과 파형의 실제 최대값을 별도 기록합니다.' if amplitude_enabled else '가속도 진폭 탐색 비활성: 주 실험실에서 단방향 / 가속도 진폭(g) 입력으로 조건 적용하세요.')).pack(anchor='w')
+        selectable=[key for key in keys if not (key=='beta' and dam.xi is not None) and not (key in ('mu_ref','flow_index') and (dam.fluid_model=='물' or (dam.xi is not None and dam.xi_scope=='total')))]
+        ttk.Label(body,text=('가진 진폭 고정: 주 실험실의 가속도 진폭(g)·Hz·램프를 그대로 사용합니다. 진폭은 탐색하지 않습니다.' if amplitude_enabled else '가진 세기는 주 실험실 입력값으로 고정하며 최적화 변수에 포함하지 않습니다.')).pack(anchor='w')
         ttk.Label(body,text=f'수면 처리: {optimization_air} · slug는 물기둥 미끄럼 근사, off는 최적 선정 제외').pack(anchor='w')
         ttk.Label(body,text=f'조율 기준 · 세계 X방향 1차 {tuning_frequency(model):.5g} Hz / 총 물 질량 {dam.mass:.5g} kg 고정').pack(anchor='w')
-        controls=ttk.Frame(win);controls.pack(fill='x')
+        controls=ttk.Frame(body);controls.pack(fill='x')
         field_widgets={};values={};fixed={};defaults={'r':(.8,1.2,.1),'beta':(.2,.8,.15),'angle':(0,90,45),
-            'B':(dam.B*.8,dam.B*1.2,dam.B*.2),'n':(1,len(model.floor_data()[0]),1),'mu_ref':(dam.mu_ref*.5,dam.mu_ref*1.5,dam.mu_ref*.5),'flow_index':(.5,1.5,.5),'amplitude_g':(0.,max(.02,float(source_metadata.get('amplitude_value',.01))) if amplitude_enabled else .02,.01)}
-        initial={'r':dam.frequency/tuning_frequency(model),'beta':dam.beta,'angle':dam.angle,'B':dam.B,'n':model.floor_data()[3],'mu_ref':dam.mu_ref,'flow_index':dam.flow_index,'amplitude_g':float(source_metadata['amplitude_value']) if amplitude_enabled else 0.}
+            'B':(dam.B*.8,dam.B*1.2,dam.B*.2),'n':(1,len(model.floor_data()[0]),1),'mu_ref':(dam.mu_ref*.5,dam.mu_ref*1.5,dam.mu_ref*.5),'flow_index':(.5,1.5,.5)}
+        initial={'r':dam.frequency/tuning_frequency(model),'beta':dam.beta,'angle':dam.angle,'B':dam.B,'n':model.floor_data()[3],'mu_ref':dam.mu_ref,'flow_index':dam.flow_index}
         for col,text in enumerate(['변수','시작','끝','간격','고정값']):
             ttk.Label(controls,text=text).grid(row=0,column=col)
         for i,key in enumerate(keys,1):
@@ -2801,19 +2806,19 @@ def lab(b,d,t,ag,title,out):
         view_mode=tk.StringVar(value='고정 조건 단면도')
         selecting=[False]
         displayed={'cells':{},'axes':None}
-        axisbar=ttk.Frame(win);axisbar.pack(fill='x')
+        axisbar=ttk.Frame(body);axisbar.pack(fill='x')
         ttk.Label(axisbar,text='X축').pack(side='left')
         xp=ttk.Combobox(axisbar,textvariable=xvar,values=selectable,state='readonly',width=8);xp.pack(side='left')
         ttk.Label(axisbar,text='Y축').pack(side='left')
         yp=ttk.Combobox(axisbar,textvariable=yvar,values=selectable,state='readonly',width=8);yp.pack(side='left')
         mode_picker=ttk.Combobox(axisbar,textvariable=view_mode,values=['고정 조건 단면도','전체 최적화 결과 투영도'],state='readonly',width=25);mode_picker.pack(side='left',padx=5)
-        ttk.Label(axisbar,text='r 조율비 / beta 개구비 / angle 각도 / B 길이 / n 층 / mu_ref 점도 / flow_index 유동지수 / amplitude_g 가속도(g)').pack(side='left',padx=8)
+        ttk.Label(axisbar,text='r 조율비 / beta 개구비 / angle 각도 / B 길이 / n 층 / mu_ref 점도 / flow_index 유동지수').pack(side='left',padx=8)
         ttk.Checkbutton(body,text='전체 최적화 · 활성 변수 범위를 명시적으로 함께 탐색',variable=full).pack(anchor='w')
         ttk.Checkbutton(body,text='최대 변위 악화 설계는 최적 선정에서 제외',variable=peak_rule).pack(anchor='w')
         feedback=tk.StringVar();ttk.Label(body,textvariable=feedback,wraplength=1150).pack(fill='x')
         columns=('amplitude_g','actual_peak_g','air_mode','beta','angle','B','r','n','mu_ref','flow_index','rms_pct','peak_pct','eligible','status','failure_time_s','completion_pct','internal_steps','fluid_scope','reason')
         table_caption=tk.StringVar();ttk.Label(body,textvariable=table_caption,wraplength=1150).pack(fill='x')
-        table_frame=ttk.Frame(win);table_frame.pack(fill='x')
+        table_frame=ttk.Frame(body);table_frame.pack(fill='x')
         tree=ttk.Treeview(table_frame,columns=columns,show='headings',height=6)
         for key,title in zip(columns,['입력 진폭(g)','실제 최대가속도(g)','수면 처리','β','θ (°)','B (m)','r','설치 층','μ_ref Pa·s','유동지수','RMS 저감 (%)','최대 저감 (%)','최적 선정 가능','상태','중단 시각 s','완료 %','내부 계산 단계','유체 모델 범위','원인']):
             tree.heading(key,text=title);tree.column(key,width=100 if key!='reason' else 320,stretch=False)
@@ -3028,7 +3033,7 @@ def lab(b,d,t,ag,title,out):
             def compute():
                 # 작업 스레드의 탐색 실행. stop과 progress는 중지 요청·진행 상황 전달에 사용한다.
                 rows=search_designs(model,dam,times,wave,g['beta'],g['angle'],g['B'],rule,g['r'],g['n'],memo,
-                    stop=run_state['cancel'],progress=run_state['progress'],mus=g['mu_ref'],indices=g['flow_index'],air_mode=optimization_air,amplitudes=g['amplitude_g'] if amplitude_enabled else None,laboratory=source_metadata if amplitude_enabled else None)
+                    stop=run_state['cancel'],progress=run_state['progress'],mus=g['mu_ref'],indices=g['flow_index'],air_mode=optimization_air,amplitudes=[float(source_metadata['amplitude_value'])] if amplitude_enabled else None,laboratory=source_metadata if amplitude_enabled else None)
                 context['stopped']=run_state['cancel'].is_set()
                 valid=[row for row in rows if row['eligible']]
                 if valid and not context['stopped']:
@@ -3059,7 +3064,6 @@ def lab(b,d,t,ag,title,out):
                 center=best[key];lo=center-step;hi=center+step
                 if key=='beta':lo=max(.001,lo);hi=min(1.,hi)
                 if key=='n':lo=max(1,lo);hi=min(len(model.floor_data()[0]),hi)
-                if key=='amplitude_g':lo=max(0.,lo)
                 if key in ('r','B','mu_ref','flow_index'):lo=max(1e-6,lo)
                 if key=='angle':lo=max(0,lo);hi=min(180,hi)
                 for v,value in zip(values[key],(lo,hi,step)):v.set(f'{value:.10g}')
@@ -3554,9 +3558,12 @@ def lab(b,d,t,ag,title,out):
         data=snapshot()
         data['values'].update(shape='U형',tilt='60',columns='4',count='2',mount='2',damping=str(eb.damping),
             width='56',depth='44',size_link=False,stiffness_mode='직접 입력',water_mass=str(ed.mass),
-            wave='단방향',hz='1.3',amplitude_mode='가속도 진폭 (g)',amplitude='0.01',
-            tune=False,ratio_enabled=False,pipe_on=True,tube_length='',cycles='39',container_mass='0',ramp_profile='quintic',start_ramp_on=False,end_ramp_on=False,damping_mode='강성비례',loss_mode='개구비',xi_scope='total',pipe_loss='0',paper_mode='사용자 실험',fluid_model='물')
-        data['groups']['pipe'].update(B=str(ed.B*100),h=str(ed.h*100),diameter=str(ed.diameter*100),angle='0',beta=str(ed.beta))
+            wave='단방향',hz=f'{eb.frequency:.2f}',amplitude_mode='가속도 진폭 (g)',amplitude='0.01',
+            tune=False,ratio_enabled=False,pipe_on=True,tube_length='',cycles='39',container_mass='0',ramp_profile='quintic',
+            start_ramp_on=True,start_ramp_value='3',start_ramp_unit='주기',end_ramp_on=True,end_ramp_value='3',end_ramp_unit='주기',
+            damping_mode='강성비례',loss_mode='개구비',xi_scope='total',xi='',pipe_loss=f'{ed.pipe_loss:g}',air_mode=AIR_MODE_LABELS['stop'],
+            paper_mode='사용자 실험',fluid_model='물')
+        data['groups']['pipe'].update(B=f'{ed.B*100:g}',h=str(ed.h*100),diameter=f'{ed.diameter*100:g}',angle='0',beta=f'{ed.beta:g}')
         data['groups']['floor']={'m':'10,10','k':'1800,1800','y':'1800,1800','h':'.3,.3'}
         data['legs']={'U형':[[],[]]}
         data['reference_size']=[eb.width,eb.depth,list(eb.masses)]
