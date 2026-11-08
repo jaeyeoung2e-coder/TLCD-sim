@@ -2429,26 +2429,38 @@ def tanveer_known_conditions():
         source='https://doi.org/10.1371/journal.pone.0224436')
 
 
+STABLE_EXAMPLE_ACCEL_G = .001  # 안정 예제의 단방향 입력 진폭[g]
 STABLE_TUNING_RATIO = .98   # 안정 예제에서만 사용하는 조율비
 
 def stable_example():
-    """넓은 탐색 범위를 위한 2층 교육용 예제. 실제 제작·구조 안전성 판정용이 아니다.
-    목표 범위 r=.9~1, beta=.2~.8, B=.1~.7 m, 기둥 기울기 45~90°, 설치 방향 0~60°.
-    기본 가진은 0.35 Hz·0.01 g·39주기·시작/종료 3주기 quintic 램프다.
-    외형은 가로 6 m·세로 5 m·층고 3.2 m의 2층 건물이다. 질량·강성은 교육용 실험값이다.
-    수면 위 여유 0.349 m: B=.7 m의 대표 113개 조합에서 약 5% 중단을 목표로 선정했다.
-    중단 비율은 가진과 탐색 격자에 따라 달라진다.
-    h는 물량 파라미터이다. 다른 가진·평가 시간의 완료 여부는 별도 계산한다.
+    """6×5 m, 층고 3.2 m의 유연한 8층 철골 전단 건물을 가정한 예제.
+    질량은 슬래브와 부가 질량의 가정값이며, 강성은 이상화한 기둥 계산값이다. 실측 자료가 아니다.
+    기준 건물 각 모드 감쇠비 5%, 조율비 .98, 설치 8층 고정으로 시작한다.
+    단방향 0.001 g·39주기·시작/종료 3주기 quintic 램프를 사용한다.
+    B=.9~1.1 m, beta=.2~.8, 기둥 기울기 45~90°, 설치 방향 0~60°를 기본 범위로 한다.
+    대표 113개 조합에서 약 5% 중단을 목표로 한다. 다른 가진·조율비·기둥 수·격자에서는 비율이 달라진다.
     """
-    building=Building(mass=20.,damping=.25,masses=(10.,10.),stories=(1.,1.),
-        stories_y=(1.,1.),heights=(3.2,3.2),mount=2,width=6.,depth=5.)
-    stiffness=(.35/tuning_frequency(building))**2
-    building=replace(building,stories=(stiffness,stiffness),stories_y=(stiffness,stiffness),frequency=.35)
-    B=.3
+    width,depth,height=6.,5.,3.2
+    # 가정: 콘크리트 밀도 2400 kg/m³, 슬래브 두께 0.15 m. 한 층 슬래브 질량=10800 kg.
+    # 보·기둥·마감·칸막이 등을 층별 부가 질량 4200 kg, 지붕층 1200 kg으로 가정한다.
+    slab_mass=width*depth*.15*2400.
+    masses=(slab_mass+4200.,)*7+(slab_mass+1200.,)  # 15000×7+12000 = 117000 kg
+    # 강재 E=200 GPa, 각형 기둥 150×150×6 mm 네 개를 양단 고정으로 가정한다.
+    # 보·접합부는 강체인 전단 모델 근사 k=4*(12EI/H³). 실제 접합부·기초 유연성은 미보정.
+    steel_modulus=200e9
+    outer,wall=.150,.006
+    second_moment=(outer**4-(outer-2*wall)**4)/12
+    story_stiffness=4*12*steel_modulus*second_moment/height**3
+    building=Building(mass=sum(masses),masses=masses,stories=(story_stiffness,)*8,
+        stories_y=(story_stiffness,)*8,heights=(height,)*8,mount=8,width=width,depth=depth,
+        damping=.05,damping_mode='모드 감쇠',container_mass=40.)  # 빈 관·지지물 40 kg도 입력 가정.
+    building=replace(building,frequency=tuning_frequency(building))
+    # 물 150 kg, 조율비 .98. 길이에 맞춰 단면적과 안지름을 함께 계산한다.
+    B=1.
     length=2*G/(2*np.pi*STABLE_TUNING_RATIO*building.frequency)**2
-    area=.29452/(1000*length)
+    area=150./(1000*length)
     return building,Damper(B=B,h=(length-B)/2,diameter=math.sqrt(4*area/np.pi),
-        freeboard=.349,beta=.5,pipe_loss=2.4)
+        freeboard=.15,beta=.5,pipe_loss=2.4)
 
 
 def read_settings(path):
@@ -3645,8 +3657,8 @@ def lab(b,d,t,ag,title,out):
         ttk.Label(body,text=f'수면 처리: {optimization_air} · 수평관 천장 도달 시 중단').pack(anchor='w')
         ttk.Label(body,text=f'조율 기준 · 세계 X방향 1차 {tuning_frequency(model):.5g} Hz / 총 물 질량 {dam.mass:.5g} kg 고정').pack(anchor='w')
         controls=ttk.Frame(body);controls.pack(fill='x')
-        field_widgets={};values={};fixed={};defaults={'r':(.8,1.2,.1),'beta':(.2,.8,.15),'angle':(0,90,45),
-            'B':(.1,.7,.2),'n':(1,len(model.floor_data()[0]),1),'tilt':(60.,90.,15.),'columns':(2,6,1)}
+        field_widgets={};values={};fixed={};defaults={'r':(.9,1.,.05),'beta':(.2,.8,.3),'angle':(0,60,30),
+            'B':(.9,1.1,.1),'n':(1,len(model.floor_data()[0]),1),'tilt':(45.,90.,22.5),'columns':(2,4,1)}
         initial={'r':dam.frequency/tuning_frequency(model),'beta':dam.beta,'angle':dam.angle,'B':dam.B,'n':model.floor_data()[3],'tilt':dam.tilt,'columns':dam.columns}
         pinned={key:tk.BooleanVar(value=True) for key in ('r','n')}
         for col,text in enumerate(['변수','시작','끝','간격','고정값','탐색 제외']):
@@ -4571,15 +4583,16 @@ def lab(b,d,t,ag,title,out):
     def load_stable_example():
         eb,ed=stable_example()
         data=snapshot()
-        data['values'].update(shape='U형',tilt='90',columns='4',count='2',mount='2',damping=str(eb.damping),
-            width=str(eb.width*100),depth=str(eb.depth*100),freeboard=str(ed.freeboard),size_link=False,stiffness_mode='직접 입력',water_mass=str(ed.mass),
-            wave='단방향',hz=f'{eb.frequency:.2f}',amplitude_mode='가속도 진폭 (g)',amplitude='0.01',
-            tune=False,ratio_enabled=False,pipe_on=True,tube_length='',cycles='39',container_mass='0',ramp_profile='quintic',
+        data['values'].update(shape='U형',tilt='90',columns='4',count=str(len(eb.masses)),mount=str(eb.mount),damping=str(eb.damping),
+            width=str(eb.width*100),depth=str(eb.depth*100),freeboard=str(ed.freeboard),size_link=False,stiffness_mode='직접 입력',water_mass=f'{ed.mass:.12g}',
+            wave='단방향',hz=f'{eb.frequency:.8g}',amplitude_mode='가속도 진폭 (g)',amplitude=str(STABLE_EXAMPLE_ACCEL_G),
+            tune=False,ratio_enabled=False,pipe_on=True,tube_length='',cycles='39',container_mass=str(eb.container_mass),ramp_profile='quintic',
             start_ramp_on=True,start_ramp_value='3',start_ramp_unit='주기',end_ramp_on=True,end_ramp_value='3',end_ramp_unit='주기',
-            damping_mode='강성비례',loss_mode='개구비',xi_scope='total',xi='',pipe_loss=f'{ed.pipe_loss:g}',air_mode=AIR_MODE_LABELS['stop'],
+            damping_mode=eb.damping_mode,loss_mode='개구비',xi_scope='total',xi='',pipe_loss=f'{ed.pipe_loss:g}',air_mode=AIR_MODE_LABELS['stop'],
             paper_mode='사용자 실험')
         data['groups']['pipe'].update(B=f'{ed.B*100:g}',h=str(ed.h*100),diameter=str(ed.diameter*100),angle='0',beta=f'{ed.beta:g}')
         data['groups']['floor']={'m':','.join(map(str,eb.masses)),'k':','.join(map(str,eb.stories)),'y':','.join(map(str,eb.stories_y)),'h':','.join(map(str,eb.heights))}
+        data['groups']['source'].update(east='-6',north='0',depth='8',strength=str(STABLE_EXAMPLE_ACCEL_G))
         data['legs']={'U형':[[],[]]}
         data['reference_size']=[eb.width,eb.depth,list(eb.masses)]
         restore(data)
