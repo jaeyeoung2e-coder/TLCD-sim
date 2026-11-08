@@ -1375,11 +1375,31 @@ def lab(b,d,t,ag,title,out):
     root.title('TLCD 실험실')
     root.geometry('1070x745')
     root.minsize(830,620)
-    panel = ttk.Frame(root,padding=14)
-    panel.pack(side='left',fill='y')
+    sidebar=ttk.Frame(root);sidebar.pack(side='left',fill='y')
+    sidebar_canvas=tk.Canvas(sidebar,highlightthickness=0,width=460)
+    sidebar_scroll=ttk.Scrollbar(sidebar,orient='vertical',command=sidebar_canvas.yview)
+    sidebar_scroll.pack(side='right',fill='y');sidebar_canvas.pack(side='left',fill='y',expand=True)
+    sidebar_canvas.configure(yscrollcommand=sidebar_scroll.set)
+    panel=ttk.Frame(sidebar_canvas,padding=14)
+    sidebar_window=sidebar_canvas.create_window((0,0),window=panel,anchor='nw')
+    def resize_sidebar(*_):
+        sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox('all'))
+        available=max(300,min(560,int(root.winfo_width()*.52)))
+        sidebar_canvas.configure(width=min(panel.winfo_reqwidth(),available))
+    panel.bind('<Configure>',resize_sidebar)
+    root.bind('<Configure>',lambda event:resize_sidebar() if event.widget is root else None,add='+')
+    def scroll_sidebar(event):
+        widget=event.widget
+        if isinstance(widget,(ttk.Combobox,ttk.Spinbox)):return
+        while widget is not None:
+            if widget is sidebar:
+                sidebar_canvas.yview_scroll(-int(event.delta/120),'units');return
+            widget=getattr(widget,'master',None)
+    root.bind_all('<MouseWheel>',scroll_sidebar,add='+')
     body = ttk.Frame(root,padding=(0,10,12,8))
     body.pack(side='left',fill='both',expand=True)
     ttk.Label(panel,text='TLCD 실험실',font=('Malgun Gothic',17,'bold')).pack(anchor='w')
+    quick_actions=ttk.Frame(panel);quick_actions.pack(fill='x',pady=(4,8))
     settings=ttk.Notebook(panel);settings.pack(fill='x',pady=6)
     pipe_page=ttk.Frame(settings,padding=6); quake_page=ttk.Frame(settings,padding=6)
     shape_page=ttk.Frame(settings,padding=6)
@@ -2490,6 +2510,7 @@ def lab(b,d,t,ag,title,out):
             stop_button.state(['!disabled'])
             root_menu=root.cget('menu')
             if root_menu:root.nametowidget(root_menu).entryconfigure('설정',state='disabled')
+            if root_menu:root.nametowidget(root_menu).entryconfigure('분석',state='disabled')
         def unlock_inputs():
             run_state['running']=False
             for widget,state in run_state['locked']:
@@ -2498,6 +2519,7 @@ def lab(b,d,t,ag,title,out):
                     if 'disabled' in state:widget.state(['disabled'])
             run_state['locked'].clear()
             if root.winfo_exists() and root.cget('menu'):root.nametowidget(root.cget('menu')).entryconfigure('설정',state='normal')
+            if root.winfo_exists() and root.cget('menu'):root.nametowidget(root.cget('menu')).entryconfigure('분석',state='normal')
             if win.winfo_exists():update_fields();stop_button.state(['disabled'])
         def cancel_search():
             run_state['cancel'].set()
@@ -2991,7 +3013,8 @@ def lab(b,d,t,ag,title,out):
     ttk.Button(precision_page,text='Tanveer 2019 알려진 조건 적용',command=lambda:apply_tanveer()).pack(fill='x')
     ttk.Button(precision_page,text='사용자 실험으로 전환',command=lambda:paper_mode.set('사용자 실험')).pack(fill='x')
     for label,cmd in [('조건 적용',calculate),('최적 설계 탐색',optimize),('현재 실험 담기',remember),('실험 그래프 비교',history_window),('각도별 그래프 비교',angle_window),('형상 × 각도 비교',compare),('결과 저장',save),('물과 지진 계산 원리',model_info)]:
-        ttk.Button(panel,text=label,command=cmd).pack(fill='x',pady=3)
+        parent=quick_actions if label in ('조건 적용','최적 설계 탐색','실험 그래프 비교') else panel
+        ttk.Button(parent,text=label,command=cmd).pack(fill='x',pady=3)
     ttk.Separator(panel).pack(fill='x',pady=12)
     ttk.Label(panel,textvariable=summary,justify='left').pack(anchor='w')
     ttk.Label(panel,textvariable=status,wraplength=205,foreground='#215a72').pack(anchor='w',pady=12)
@@ -3204,7 +3227,13 @@ def lab(b,d,t,ag,title,out):
     settings_menu.add_command(label='기본 안정 예제 불러오기',command=load_stable_example)
     settings_menu.add_command(label='이름 붙여 설정 저장',command=save_named)
     settings_menu.add_command(label='저장한 설정 불러오기',command=load_named)
-    menu.add_cascade(label='설정',menu=settings_menu);root.configure(menu=menu)
+    menu.add_cascade(label='설정',menu=settings_menu)
+    analysis_menu=tk.Menu(menu,tearoff=False)
+    for label,command in [('최적 설계 탐색',optimize),('실험 그래프 비교',history_window),
+            ('각도별 그래프 비교',angle_window),('형상 × 각도 비교',compare),
+            ('주 실험실 주파수 응답',frequency_window),('층별 가속도 표',acceleration_window)]:
+        analysis_menu.add_command(label=label,command=command)
+    menu.add_cascade(label='분석',menu=analysis_menu);root.configure(menu=menu)
     if saved.get('last'):root.after(100,lambda:restore(saved['last']))
     root.protocol('WM_DELETE_WINDOW',root.destroy)
     try: root.mainloop()
