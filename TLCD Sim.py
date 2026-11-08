@@ -2448,7 +2448,7 @@ def stable_example():
     length=2*G/(2*np.pi*STABLE_TUNING_RATIO*building.frequency)**2
     area=.29452/(1000*length)
     return building,Damper(B=B,h=(length-B)/2,diameter=math.sqrt(4*area/np.pi),
-        freeboard=.349,beta=.5,pipe_loss=0.)
+        freeboard=.349,beta=.5,pipe_loss=2.4)
 
 
 def read_settings(path):
@@ -3648,12 +3648,15 @@ def lab(b,d,t,ag,title,out):
         field_widgets={};values={};fixed={};defaults={'r':(.8,1.2,.1),'beta':(.2,.8,.15),'angle':(0,90,45),
             'B':(.1,.7,.2),'n':(1,len(model.floor_data()[0]),1),'tilt':(60.,90.,15.),'columns':(2,6,1)}
         initial={'r':dam.frequency/tuning_frequency(model),'beta':dam.beta,'angle':dam.angle,'B':dam.B,'n':model.floor_data()[3],'tilt':dam.tilt,'columns':dam.columns}
-        for col,text in enumerate(['변수','시작','끝','간격','고정값']):
+        pinned={key:tk.BooleanVar(value=True) for key in ('r','n')}
+        for col,text in enumerate(['변수','시작','끝','간격','고정값','탐색 제외']):
             ttk.Label(controls,text=text).grid(row=0,column=col)
         for i,key in enumerate(keys,1):
             ttk.Label(controls,text=labels[key]).grid(row=i,column=0,sticky='w')
             values[key]=[tk.StringVar(value=f'{x:.8g}') for x in defaults[key]]
             fixed[key]=tk.StringVar(value=f'{initial[key]:.10g}')
+            if key in pinned:
+                ttk.Checkbutton(controls,text='고정',variable=pinned[key]).grid(row=i,column=5,padx=6)
             if key not in selectable:
                 ttk.Label(controls,text=f'{initial[key]:.7g} · 현재 설계 기준 고정').grid(row=i,column=1,columnspan=4)
                 continue
@@ -3672,7 +3675,7 @@ def lab(b,d,t,ag,title,out):
         yp=ttk.Combobox(axisbar,textvariable=yvar,values=selectable,state='readonly',width=8);yp.pack(side='left')
         mode_picker=ttk.Combobox(axisbar,textvariable=view_mode,values=['고정 조건 단면도','전체 최적화 결과 투영도'],state='readonly',width=25);mode_picker.pack(side='left',padx=5)
         ttk.Label(axisbar,text='r 조율비 / beta 개구비 / angle 각도 / B 길이 / n 층 / tilt 기둥 기울기 / columns 기둥 수').pack(side='left',padx=8)
-        ttk.Checkbutton(body,text='전체 최적화 · 활성 변수 범위를 명시적으로 함께 탐색',variable=full).pack(anchor='w')
+        ttk.Checkbutton(body,text='전체 최적화 · 고정하지 않은 활성 변수 범위 탐색',variable=full).pack(anchor='w')
         ttk.Checkbutton(body,text='최대 변위 악화 설계는 최적 선정에서 제외',variable=peak_rule).pack(anchor='w')
         feedback=tk.StringVar();ttk.Label(body,textvariable=feedback,wraplength=1150).pack(fill='x')
         columns=('amplitude_g','actual_peak_g','air_mode','beta','angle','B','r','width_cm','height_cm','n','tilt','columns','rms_pct','peak_pct','eligible','status','failure_time_s','completion_pct','internal_steps','fluid_scope','reason','check_status','check_rms_delta_pp','check_peak_delta_pp')
@@ -3696,10 +3699,16 @@ def lab(b,d,t,ag,title,out):
         ttk.Label(body,textvariable=progress_text).pack(fill='x')
         explanation=tk.StringVar()
         ttk.Label(body,textvariable=explanation,wraplength=1150).pack(fill='x')
+        def is_varied(key):
+            return key in selectable and not (key in pinned and pinned[key].get()) and (full.get() or key in (xvar.get(),yvar.get()))
         def update_fields():
             if run_state['running']:return
+            available=[key for key in selectable if not (key in pinned and pinned[key].get())]
+            xp.configure(values=available);yp.configure(values=available)
+            if xvar.get() not in available:xvar.set(next(key for key in available if key!=yvar.get()))
+            if yvar.get() not in available or yvar.get()==xvar.get():yvar.set(next(key for key in available if key!=xvar.get()))
             for key in selectable:
-                varied=full.get() or key in (xvar.get(),yvar.get())
+                varied=is_varied(key)
                 for col in range(1,5):
                     field_widgets[key,col].state(['!disabled'] if (col<=3)==varied else ['disabled'])
         def lock_inputs():
@@ -3735,7 +3744,7 @@ def lab(b,d,t,ag,title,out):
             for key in keys:
                 if key not in selectable:
                     output[key]=np.array([initial[key]]);continue
-                if full.get() or key in (xvar.get(),yvar.get()):
+                if is_varied(key):
                     lo,hi,step=[float(v.get()) for v in values[key]]
                     if not all(np.isfinite([lo,hi,step])) or step<=0 or hi<lo:raise ValueError('시작 ≤ 끝, 간격 > 0으로 입력하세요.')
                     if key in ('n','columns') and any(not v.is_integer() for v in (lo,hi,step)):raise ValueError('설치 층의 시작·끝·간격은 정수입니다.')
@@ -3753,7 +3762,7 @@ def lab(b,d,t,ag,title,out):
             try:
                 # 화면의 탐색 범위와 고정값으로 실제 계산할 격자를 만든다. 예상 조합 수도 이 격자에서 센다.
                 g=grids()
-                varied=selectable if full.get() else [xvar.get(),yvar.get()]
+                varied=[key for key in selectable if is_varied(key)]
                 explanation.set('탐색 · '+', '.join(labels[k] for k in varied)+' / 유지 · '+(', '.join(f'{labels[k]}={fixed[k].get()}' for k in keys if k not in varied) or '없음'))
                 if equivalent_u(dam):
                     lines=[]
@@ -3792,7 +3801,7 @@ def lab(b,d,t,ag,title,out):
                 selecting[0]=True
                 try:
                     for key in keys:
-                        if key not in (xx,yy):fixed[key].set(f'{snapped[key]:.12g}')
+                        if key not in (xx,yy) and not (key in pinned and pinned[key].get()):fixed[key].set(f'{snapped[key]:.12g}')
                 finally:selecting[0]=False
             displayed.update(cells={(float(row[xx]),float(row[yy])):row for row in section},axes=ax)
             table_caption.set('실제 계산 결과 · '+view_mode.get()+' · '+context['source']+' · 표시 단면 '+str(snapped))
@@ -3877,8 +3886,8 @@ def lab(b,d,t,ag,title,out):
             except ValueError as error:feedback.set(str(error));return
             if pending[0]:win.after_cancel(pending[0]);pending[0]=None
             # 계산 시작 시 입력 조건을 복사한다. 이후 결과표·그림·CSV는 이 계산 조건을 참조한다.
-            context=dict(x=xvar.get(),y=yvar.get(),fixed={k:float(g[k][0]) if full.get() or k in (xvar.get(),yvar.get()) else float(v.get()) for k,v in fixed.items()},
-                grids={k:v.tolist() for k,v in g.items()},full=full.get(),require_peak=rule,
+            context=dict(x=xvar.get(),y=yvar.get(),fixed={k:float(g[k][0]) for k in fixed},
+                grids={k:v.tolist() for k,v in g.items()},full=full.get(),pinned={k:v.get() for k,v in pinned.items()},require_peak=rule,
                 building=asdict(model),damper=asdict(dam),source=source_description,source_metadata=source_metadata,air_mode=optimization_air,
                 excitation_sha256=hashlib.sha256(times.tobytes()+wave.tobytes()).hexdigest(),
                 duration_s=float(times[-1]-times[0]),samples=len(times),stopped=False)
@@ -3949,7 +3958,7 @@ def lab(b,d,t,ag,title,out):
         def save_png():
             path=filedialog.asksaveasfilename(parent=win,defaultextension='.png',filetypes=[('PNG','*.png')])
             if path:fig.savefig(path,dpi=300,bbox_inches='tight')
-        buttons=ttk.Frame(controls);buttons.grid(row=len(keys)+1,column=0,columnspan=5)
+        buttons=ttk.Frame(controls);buttons.grid(row=len(keys)+1,column=0,columnspan=6)
         for label,command in [('계산 / 지도 갱신',start),('축 교환',swap),('최적점 주변 정밀 탐색',refine),('CSV·Excel 저장',save_csv),('PNG 300 dpi 저장',save_png)]:
             ttk.Button(buttons,text=label,command=command).pack(side='left')
         stop_button=ttk.Button(buttons,text='중지',command=cancel_search,state='disabled');stop_button.pack(side='left')
@@ -3967,7 +3976,7 @@ def lab(b,d,t,ag,title,out):
                     else:pending[0]=None;draw(results)
                 pending[0]=win.after(600,refresh_map)
         for value in fixed.values():value.trace_add('write',fixed_changed)
-        for value in (xvar,yvar,full):value.trace_add('write',counts)
+        for value in (xvar,yvar,full,*pinned.values()):value.trace_add('write',counts)
         counts()
     def compare():
         if paper_mode.get()=='논문 미확인':
