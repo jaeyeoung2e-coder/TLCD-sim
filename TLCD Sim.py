@@ -3758,7 +3758,9 @@ def lab(b,d,t,ag,title,out):
         controls=ttk.Frame(body);controls.pack(fill='x')
         field_widgets={};values={};fixed={};defaults=default_search_ranges(model)
         initial={'r':dam.frequency/tuning_frequency(model),'beta':dam.beta,'angle':dam.angle,'B':dam.B,'n':model.floor_data()[3],'tilt':dam.tilt,'columns':dam.columns,'pipe_loss':dam.pipe_loss}
-        pinned={key:tk.BooleanVar(value=True) for key in ('r','n')}
+        # 기본 계산량은 그대로 B·개구비 두 변수만 탐색한다. 모든 행에서 독립적으로 고정/해제 가능.
+        default_axes=('B','beta' if 'beta' in selectable else 'angle')
+        pinned={key:tk.BooleanVar(value=key not in default_axes or key not in selectable) for key in keys}
         for col,text in enumerate(['변수','시작','끝','간격','고정값','탐색 제외']):
             ttk.Label(controls,text=text).grid(row=0,column=col)
         for i,key in enumerate(keys,1):
@@ -3766,14 +3768,16 @@ def lab(b,d,t,ag,title,out):
             values[key]=[tk.StringVar(value=f'{x:.8g}') for x in defaults[key]]
             fixed[key]=tk.StringVar(value=f'{initial[key]:.10g}')
             if key in pinned:
-                ttk.Checkbutton(controls,text='고정',variable=pinned[key]).grid(row=i,column=5,padx=6)
+                pin_button=ttk.Checkbutton(controls,text='고정',variable=pinned[key])
+                pin_button.grid(row=i,column=5,padx=6)
+                if key not in selectable:pin_button.state(['disabled'])
             if key not in selectable:
                 ttk.Label(controls,text=f'{initial[key]:.7g} · 현재 설계 기준 고정').grid(row=i,column=1,columnspan=4)
                 continue
             for col,v in enumerate([*values[key],fixed[key]],1):
                 entry=ttk.Entry(controls,textvariable=v,width=12);entry.grid(row=i,column=col)
                 field_widgets[key,col]=entry
-        xvar=tk.StringVar(value='B');yvar=tk.StringVar(value='n' if dam.xi is not None else 'beta');full=tk.BooleanVar(value=False)
+        xvar=tk.StringVar(value=default_axes[0]);yvar=tk.StringVar(value=default_axes[1]);full=tk.BooleanVar(value=True)
         peak_rule=tk.BooleanVar(value=True)
         view_mode=tk.StringVar(value='고정 조건 단면도')
         selecting=[False]
@@ -3785,8 +3789,9 @@ def lab(b,d,t,ag,title,out):
         yp=ttk.Combobox(axisbar,textvariable=yvar,values=selectable,state='readonly',width=8);yp.pack(side='left')
         mode_picker=ttk.Combobox(axisbar,textvariable=view_mode,values=['고정 조건 단면도','전체 최적화 결과 투영도'],state='readonly',width=25);mode_picker.pack(side='left',padx=5)
         ttk.Label(axisbar,text='r 조율비 / beta 개구비 / angle 각도 / B 길이 / n 층 / tilt 기둥 기울기 / columns 기둥 수 / pipe_loss 관 손실').pack(side='left',padx=8)
-        ttk.Checkbutton(body,text='전체 최적화 · 고정하지 않은 활성 변수 범위 탐색',variable=full).pack(anchor='w')
+        ttk.Checkbutton(body,text='고정 해제한 모든 변수 탐색 · 3개 이상도 가능 (해제하면 X·Y축 변수만 탐색)',variable=full).pack(anchor='w')
         ttk.Checkbutton(body,text='최대 변위 악화 설계는 최적 선정에서 제외',variable=peak_rule).pack(anchor='w')
+        ttk.Label(body,text='각 행의 고정 체크 → 고정값 1개만 사용 / 체크 해제 → 시작·끝·간격으로 탐색. 모두 고정하면 한 조건만 계산합니다. 고정된 변수도 표시 축으로 선택할 수 있습니다.',wraplength=1150).pack(anchor='w')
         feedback=tk.StringVar();ttk.Label(body,textvariable=feedback,wraplength=1150).pack(fill='x')
         columns=('pipe_loss','xi_orifice','xi_total','amplitude_g','actual_peak_g','air_mode','beta','angle','B','r','width_cm','height_cm','n','tilt','columns','rms_pct','peak_pct','eligible','status','failure_time_s','completion_pct','internal_steps','fluid_scope','reason','check_status','check_rms_delta_pp','check_peak_delta_pp')
         table_caption=tk.StringVar();ttk.Label(body,textvariable=table_caption,wraplength=1150).pack(fill='x')
@@ -3813,7 +3818,8 @@ def lab(b,d,t,ag,title,out):
             return key in selectable and not (key in pinned and pinned[key].get()) and (full.get() or key in (xvar.get(),yvar.get()))
         def update_fields():
             if run_state['running']:return
-            available=[key for key in selectable if not (key in pinned and pinned[key].get())]
+            # 표시 축은 고정 여부와 분리한다. 탐색 변수가 0~1개여도 두 축을 유지한다.
+            available=list(selectable)
             xp.configure(values=available);yp.configure(values=available)
             if xvar.get() not in available:xvar.set(next(key for key in available if key!=yvar.get()))
             if yvar.get() not in available or yvar.get()==xvar.get():yvar.set(next(key for key in available if key!=xvar.get()))
@@ -3874,7 +3880,7 @@ def lab(b,d,t,ag,title,out):
                 # 화면의 탐색 범위와 고정값으로 실제 계산할 격자를 만든다. 예상 조합 수도 이 격자에서 센다.
                 g=grids()
                 varied=[key for key in selectable if is_varied(key)]
-                explanation.set('탐색 · '+', '.join(labels[k] for k in varied)+' / 유지 · '+(', '.join(f'{labels[k]}={fixed[k].get()}' for k in keys if k not in varied) or '없음'))
+                explanation.set('탐색 · '+(', '.join(labels[k] for k in varied) or '없음 (모든 변수 고정)')+' / 유지 · '+(', '.join(f'{labels[k]}={fixed[k].get()}' for k in keys if k not in varied) or '없음'))
                 if equivalent_u(dam):
                     lines=[]
                     for ratio in g['r']:
@@ -3925,23 +3931,23 @@ def lab(b,d,t,ag,title,out):
             finite=matrix[np.isfinite(matrix)];bound=max(1.,float(np.max(abs(finite))) if len(finite) else 1.)
             norm=TwoSlopeNorm(vmin=-bound,vcenter=0,vmax=bound)
             if xs and ys:
+                def edges(values):
+                    a=np.array(values,float)
+                    if len(a)==1:return np.array([a[0]-.05,a[0]+.05])
+                    return np.r_[a[0]-(a[1]-a[0])/2,(a[:-1]+a[1:])/2,a[-1]+(a[-1]-a[-2])/2]
+                xe,ye=edges(xs),edges(ys)
                 masked=np.ma.masked_invalid(matrix)
                 if xx not in ('n','columns') and yy not in ('n','columns') and min(len(xs),len(ys))>=4 and np.isfinite(matrix).all():
                     im=ax.contourf(xs,ys,masked,levels=np.linspace(-bound,bound,17),cmap='RdBu',norm=norm)
                     if np.ptp(finite)>1e-10:
                         lines=ax.contour(xs,ys,masked,levels=7,colors='#44515c',linewidths=.5);ax.clabel(lines,fmt='%.1f',fontsize=7)
                 else:
-                    im=ax.pcolormesh(xs,ys,masked,shading='nearest',cmap='RdBu',norm=norm)
+                    im=ax.pcolormesh(xe,ye,masked,shading='flat',cmap='RdBu',norm=norm)
                 fig.colorbar(im,ax=ax,label='RMS 지붕 변위 저감률 (%)')
                 from matplotlib.patches import Rectangle
                 invalid_styles={'초기 충수 조건 미달':('#dbb4e8','///'),
                     '모델 적용 범위 초과':('#f0c785','xxx'),'수면 상한 도달':('#f0c785','+++'),
                     '수면 하한 도달':('#edbca9','---'),'잘못된 설계':('#c8cbd0','...'),'계산 오류':('#e09ba5','***')}
-                def edges(values):
-                    a=np.array(values,float)
-                    if len(a)==1:return np.array([a[0]-.05,a[0]+.05])
-                    return np.r_[a[0]-(a[1]-a[0])/2,(a[:-1]+a[1:])/2,a[-1]+(a[-1]-a[-2])/2]
-                xe,ye=edges(xs),edges(ys)
                 seen=set()
                 for row in section:
                     if row['rms_pct'] is not None or row[xx] is None or row[yy] is None:continue
@@ -4045,7 +4051,10 @@ def lab(b,d,t,ag,title,out):
         def refine():
             best=best_state[0]
             if best is None:return
-            for key in (xvar.get(),yvar.get()):
+            varied=[key for key in keys if is_varied(key)]
+            if not varied:
+                feedback.set('모든 변수가 고정되어 정밀 탐색할 변수가 없습니다. 원하는 변수의 고정을 해제하세요.');return
+            for key in varied:
                 step=float(values[key][2].get())/2
                 if key in ('n','columns'):step=max(1,int(step))
                 center=best[key];lo=center-step;hi=center+step
