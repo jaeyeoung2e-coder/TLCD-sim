@@ -306,6 +306,12 @@ def equivalent_u(d):
 
 @lru_cache(maxsize=256)
 def damper_frequency(d,gravity):
+    geometry=replace(d,beta=1.,xi=None,xi_scope='total',pipe_loss=0.,angle=0.,reverse=False)
+    return _geometry_frequency(geometry,gravity)
+
+
+@lru_cache(maxsize=256)
+def _geometry_frequency(d,gravity):
     # 캐시는 스칼라 결과만 저장한다. 네트워크 행렬/시간 이력 배열은 캐싱하지 않는다.
     if equivalent_u(d):return math.sqrt(2*gravity/d.length)/(2*np.pi)
     mass,stiffness=network(d)[7:9]
@@ -406,6 +412,12 @@ def column_surface_text(d,b):
 
 @lru_cache(maxsize=512)
 def validate_column_spacing(d):
+    geometry=replace(d,beta=1.,xi=None,xi_scope='total',pipe_loss=0.,angle=0.,reverse=False)
+    return _geometry_spacing(geometry)
+
+
+@lru_cache(maxsize=512)
+def _geometry_spacing(d):
     """수직·경사 기둥 축 선분 사이 거리를 안지름 합으로 검사한다.
     관벽 두께를 입력받지 않으므로 안지름 기준의 최소 간섭 검사다.
     의도된 바닥 유로 접합부는 검사 대상인 기둥 축에 포함하지 않는다.
@@ -1090,10 +1102,21 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
                 rms_pct=None,peak_pct=None,status='',reason='',eligible=False,failure_time_s=None,completion_pct=0.,initial_h_m=None,initial_D_m=None,B_limit_m=None)
             try:
                 # 같은 B·조율비·설치 층에서는 형상 조율을 재사용한다. 개구비와 각도는 이후에 별도로 적용한다.
+                if not float(floor).is_integer() or not 1<=float(floor)<=len(b.floor_data()[0]):
+                    raise ValueError('설치 층은 건물 범위 안의 정수여야 합니다.')
                 variant=design_variant(d,tilt,columns)
-                geometry_key=(float(B),None if ratio is None else float(ratio),float(floor),float(tilt),float(columns))
-                if geometry_key not in trial_cache:trial_cache[geometry_key]=search_trial(b,variant,float(B),ratio,floor)
-                model,test=trial_cache[geometry_key]
+                geometry_key=(float(B),None if ratio is None else float(ratio),float(tilt),float(columns))
+                if geometry_key not in trial_cache:
+                    try:
+                        trial_cache[geometry_key]=search_trial(b,variant,float(B),ratio,floor)
+                    except ValueError as error:
+                        # 같은 치수에서 확정된 기하·조율 오류도 재사용한다. 각 후보 행에는 원인을 계속 기록한다.
+                        trial_cache[geometry_key]=error
+                cached_geometry=trial_cache[geometry_key]
+                if isinstance(cached_geometry,ValueError):
+                    raise ValueError(str(cached_geometry))
+                model,test=cached_geometry
+                model=replace(model,mount=int(floor))
                 test=replace(test,beta=float(beta),angle=float(angle))
                 validate(model,test)
                 row.update(r=test.frequency/tuning_frequency(b) if ratio is None else float(ratio),h=test.h,diameter_m=test.diameter,
@@ -1530,6 +1553,32 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
         if _cancel is not None and _cancel.is_set():raise TimeoutError('중지 요청')
         if _deadline is not None and perf_counter()>=_deadline:raise TimeoutError('추가 확인 시간 제한')
     check_budget()
+    previous_flow=[None,None]
+    def solve_mid(free):
+        # 오리피스·명시한 추가 손실을 포함해 중점 속도 full_mid를 구한다.
+        if scalar_flow:
+            rhs=scalar_path*float(free[-1])
+            velocity=2*rhs/(1+math.sqrt(1+4*scalar_coefficient*abs(rhs)))
+            full_mid[active]=free-scalar_drag*(abs(velocity)*velocity)
+        else:
+            rhs=T@free[-modes:]
+            flow=rhs.copy() if previous_flow[0] is None else previous_flow[0]+rhs-previous_flow[1]
+            tolerance=1e-11*(1+max(abs(rhs)))
+            for _ in range(20):
+                # 여러 유로는 유속과 저항의 연성 방정식을 Newton 반복으로 푼다. 수렴 실패는 오류로 보고한다.
+                residual=flow+transfer@(weights*abs(flow)*flow)-rhs
+                if max(abs(residual))<tolerance:break
+                flow-=np.linalg.solve(flow_eye+transfer*(2*weights*abs(flow)),residual)
+            else:
+                # 예측 초기값이 불리하면 기존 초기값과 반복 횟수로 다시 푼다.
+                flow=rhs.copy()
+                for _ in range(20):
+                    residual=flow+transfer@(weights*abs(flow)*flow)-rhs
+                    if max(abs(residual))<tolerance:break
+                    flow-=np.linalg.solve(flow_eye+transfer*(2*weights*abs(flow)),residual)
+                else:raise ValueError('유체 저항 계산이 수렴하지 않았습니다. 입력 조건을 확인하세요.')
+            previous_flow[:]=[flow.copy(),rhs.copy()]
+            full_mid[active]=free-drag@(T.T@(weights*abs(flow)*flow))
     # 출력 기록의 각 구간을 내부 안정 간격으로 다시 나누고 ag는 선형 보간한다.
     for i,span in enumerate(np.diff(t),1):
         check_budget()
@@ -1583,21 +1632,6 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
             gm=ag[i-1]+(ag[i]-ag[i-1])*(j+.5)/count
             # 비선형 오리피스 저항을 적용하기 전의 중점 속도 예측값.
             free0=vm@v[active]+qm@q[active]+force*gm
-            def solve_mid(free):
-                # 오리피스·명시한 추가 손실을 포함해 중점 속도 full_mid를 구한다.
-                if scalar_flow:
-                    rhs=scalar_path*float(free[-1])
-                    velocity=2*rhs/(1+math.sqrt(1+4*scalar_coefficient*abs(rhs)))
-                    full_mid[active]=free-scalar_drag*(abs(velocity)*velocity)
-                else:
-                    rhs=T@free[-modes:];flow=rhs.copy()
-                    for _ in range(20):
-                        # 여러 유로는 유속과 저항의 연성 방정식을 Newton 반복으로 푼다. 수렴 실패는 오류로 보고한다.
-                        residual=flow+transfer@(weights*abs(flow)*flow)-rhs
-                        if max(abs(residual))<1e-11*(1+max(abs(rhs))):break
-                        flow-=np.linalg.solve(flow_eye+transfer*(2*weights*abs(flow)),residual)
-                    else:raise ValueError('유체 저항 계산이 수렴하지 않았습니다. 입력 조건을 확인하세요.')
-                    full_mid[active]=free-drag@(T.T@(weights*abs(flow)*flow))
             if slug:
                 # 기둥 둘/유체 자유도 하나. 선형 모형과의 차이를 보정력으로 더한다.
                 # 유체: 중력 복원력 제거, 수평관 결합 감소(e/B), 질량 변화 Δm(q)의 Δm·q̈+½Δm'·q̇².
@@ -1632,7 +1666,7 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
             if slug:a_prev=(v[active]-old_v[active])/dt;gm_prev=gm
             # 유체 일반화 좌표를 화면에서 보는 각 기둥 수면 변화로 바꾼다. 단위는 m이다.
             rise=S@q[fluid:]
-            if installed and mode!='off' and (np.any(rise<=lower_rise) or np.any(rise>=clearance)):
+            if installed and mode!='off' and np.max(np.maximum(lower_rise-rise,rise-clearance))>=0:
                 old_rise=S@old_q[fluid:]
                 lower=lower_rise
                 upper=np.broadcast_to(np.asarray(clearance),rise.shape)
@@ -2083,17 +2117,20 @@ def tanveer_known_conditions():
 STABLE_TUNING_RATIO = .98   # 안정 예제에서만 사용하는 조율비
 
 def stable_example():
-    """실행·조작 확인용 권장 예제. 실제 건물의 안전성 보증용 설계가 아니다.
-
-    2층 모형(각 10 kg, 층강성 1800 N/m, 1차 약 1.32 Hz, 감쇠비 2%)에 조율비 0.98로 맞춘 U형 TLCD.
-    B 16 cm, 안지름 4 cm, 물 약 0.37 kg(질량비 약 1.9%), β 0.5 + 첨부 예제에서 명시한 추가 손실 2.4(이 예제에만 적용).
-    정밀 모드에서 공진 사인(0.01 g, 39회, quintic 3주기 램프)·엘센트로·고베·멕시코시티 모두 끝까지 계산되며
-    물 변화는 최대 약 4 cm로 수평관 천장 한계(약 4.9 cm) 안이다. 건물 진동수 ±10%에서도 유효하다."""
-    building=Building(mass=20.,damping=.02,masses=(10.,10.),stories=(1800.,1800.),
-        stories_y=(1800.,1800.),heights=(.3,.3),mount=2)
-    building=replace(building,frequency=tuning_frequency(building))
-    B=.16;omega=2*np.pi*STABLE_TUNING_RATIO*building.frequency;L=2*G/omega**2
-    return building,Damper(B=B,h=(L-B)/2,diameter=.04,freeboard=.12,beta=.5,pipe_loss=2.4)
+    """넓은 탐색 범위를 위한 2층 교육용 예제. 실제 제작·구조 안전성 판정용이 아니다.
+    목표 범위 r=.9~1, beta=.2~.8, B=.1~1 m, 기둥 기울기 45~90°, 설치 방향 0~60°.
+    기본 가진은 0.35 Hz·0.01 g·39주기·시작/종료 3주기 quintic 램프다.
+    h는 물량 파라미터이며 긴 관이 필요하다. 다른 가진·평가 시간의 완료 여부는 별도 계산한다.
+    """
+    building=Building(mass=20.,damping=.25,masses=(10.,10.),stories=(1.,1.),
+        stories_y=(1.,1.),heights=(.3,.3),mount=2,width=1.2,depth=1.2)
+    stiffness=(.35/tuning_frequency(building))**2
+    building=replace(building,stories=(stiffness,stiffness),stories_y=(stiffness,stiffness),frequency=.35)
+    B=.3
+    length=2*G/(2*np.pi*STABLE_TUNING_RATIO*building.frequency)**2
+    area=.29452/(1000*length)
+    return building,Damper(B=B,h=(length-B)/2,diameter=math.sqrt(4*area/np.pi),
+        freeboard=.75,beta=.5,pipe_loss=0.)
 
 
 def read_settings(path):
@@ -2453,6 +2490,7 @@ def lab(b,d,t,ag,title,out):
     container_mass_var=tk.StringVar(value=str(b.container_mass))
     ttk.Label(pipe_page,text='빈 관·부착물 질량 (kg, 실측값)').pack(anchor='w')
     ttk.Entry(pipe_page,textvariable=container_mass_var,width=10).pack(anchor='w')
+    freeboard_var=tk.StringVar(value=str(d.freeboard))  # 수면 위 여유[m], 설정별 보존
     tube_length_var=tk.StringVar(value='' if d.leg_length is None else f'{100*d.leg_length:g}')
     ttk.Label(pipe_page,text='각 기둥 관 길이 (cm, 관 축 기준)').pack(anchor='w')
     ttk.Entry(pipe_page,textvariable=tube_length_var,width=10).pack(anchor='w')
@@ -2474,7 +2512,7 @@ def lab(b,d,t,ag,title,out):
             if height<=0:raise ValueError('수직부에 남는 물이 없습니다.')
             bores,tops=leg_specs.get(shape_var.get(),((),()))
             trial=replace(d,bores=bores,tops=tops,columns=int(column_var.get()),shape=internal_shape(shape_var.get(),float(tilt_var.get()),bores,tops),
-                B=width,h=height,diameter=diameter,tilt=float(tilt_var.get()))
+                B=width,h=height,diameter=diameter,tilt=float(tilt_var.get()),freeboard=float(freeboard_var.get()))
             validate(b,trial)
             water_note.set(column_surface_text(trial,b))
             fields['h'].set(f'{height*100:.9g}')
@@ -3077,6 +3115,7 @@ def lab(b,d,t,ag,title,out):
             vals['xi_scope']=xi_scope_var.get()
             vals['xi']=float(xi_var.get()) if loss_mode_var.get()=='직접 ξ' else None
             vals['pipe_loss']=float(pipe_loss_var.get())
+            vals['freeboard']=float(freeboard_var.get())
             raw=replace(d,**vals); validate(target_b,raw)
             kind=kind_var.get()
             # 단방향은 실험실 Hz/진폭만 사용. 지진 기록 모드에서만 진원·거리·세기 입력을 사용한다.
@@ -4091,7 +4130,7 @@ def lab(b,d,t,ag,title,out):
         saved=dict(version=1,profiles={},last=None)
         messagebox.showwarning('설정 읽기',f'기존 설정을 읽지 못했습니다. 파일을 확인하세요.\n{error}')
     variable_groups={'pipe':fields,'floor':floor_fields,'source':quake_fields}
-    variables=dict(xi_scope=xi_scope_var,ramp_profile=ramp_profile_var,container_mass=container_mass_var,damping_mode=damping_mode_var,cx=c_vars['x'],cy=c_vars['y'],loss_mode=loss_mode_var,xi=xi_var,pipe_loss=pipe_loss_var,air_mode=air_mode_var,paper_mode=paper_mode,shape=shape_var,tilt=tilt_var,columns=column_var,count=count_var,mount=mount_var,
+    variables=dict(freeboard=freeboard_var,xi_scope=xi_scope_var,ramp_profile=ramp_profile_var,container_mass=container_mass_var,damping_mode=damping_mode_var,cx=c_vars['x'],cy=c_vars['y'],loss_mode=loss_mode_var,xi=xi_var,pipe_loss=pipe_loss_var,air_mode=air_mode_var,paper_mode=paper_mode,shape=shape_var,tilt=tilt_var,columns=column_var,count=count_var,mount=mount_var,
         damping=damping_var,width=size_vars[0],depth=size_vars[1],size_link=size_link,
         stiffness_mode=stiffness_mode,water_mass=water_var,tube_length=tube_length_var,wave=kind_var,hz=hz_var,
         amplitude_mode=amplitude_mode,amplitude=amplitude_var,cycles=cycles_var,
@@ -4124,6 +4163,7 @@ def lab(b,d,t,ag,title,out):
         try:
             # 설정 JSON의 values는 일반 입력, groups는 관·층별·진원 입력 묶음이다.
             values=data['values'];groups=data['groups']
+            freeboard_var.set('.12')  # 예전 프로필의 기존 여유 높이 보존
             damping_mode_var.set('강성비례');loss_mode_var.set('개구비');xi_var.set('');xi_scope_var.set('total');pipe_loss_var.set('0');paper_mode.set('사용자 실험')
             for flag,value,unit in ramps.values():flag.set(False)
             if 'csv_metadata' in data:
@@ -4201,14 +4241,14 @@ def lab(b,d,t,ag,title,out):
         eb,ed=stable_example()
         data=snapshot()
         data['values'].update(shape='U형',tilt='90',columns='4',count='2',mount='2',damping=str(eb.damping),
-            width='56',depth='44',size_link=False,stiffness_mode='직접 입력',water_mass=str(ed.mass),
+            width=str(eb.width*100),depth=str(eb.depth*100),freeboard=str(ed.freeboard),size_link=False,stiffness_mode='직접 입력',water_mass=str(ed.mass),
             wave='단방향',hz=f'{eb.frequency:.2f}',amplitude_mode='가속도 진폭 (g)',amplitude='0.01',
             tune=False,ratio_enabled=False,pipe_on=True,tube_length='',cycles='39',container_mass='0',ramp_profile='quintic',
             start_ramp_on=True,start_ramp_value='3',start_ramp_unit='주기',end_ramp_on=True,end_ramp_value='3',end_ramp_unit='주기',
             damping_mode='강성비례',loss_mode='개구비',xi_scope='total',xi='',pipe_loss=f'{ed.pipe_loss:g}',air_mode=AIR_MODE_LABELS['stop'],
             paper_mode='사용자 실험')
-        data['groups']['pipe'].update(B=f'{ed.B*100:g}',h=str(ed.h*100),diameter=f'{ed.diameter*100:g}',angle='0',beta=f'{ed.beta:g}')
-        data['groups']['floor']={'m':'10,10','k':'1800,1800','y':'1800,1800','h':'.3,.3'}
+        data['groups']['pipe'].update(B=f'{ed.B*100:g}',h=str(ed.h*100),diameter=str(ed.diameter*100),angle='0',beta=f'{ed.beta:g}')
+        data['groups']['floor']={'m':','.join(map(str,eb.masses)),'k':','.join(map(str,eb.stories)),'y':','.join(map(str,eb.stories_y)),'h':','.join(map(str,eb.heights))}
         data['legs']={'U형':[[],[]]}
         data['reference_size']=[eb.width,eb.depth,list(eb.masses)]
         restore(data)
@@ -4223,7 +4263,7 @@ def lab(b,d,t,ag,title,out):
         data=snapshot()
         data['values'].update(shape='U형',count='4',mount='4',size_link=False,
             stiffness_mode='직접 입력',damping_mode='직접 계수',cx='1.720,1.720,1.720,1.720',cy='1.720,1.720,1.720,1.720',
-            water_mass=str(pd.mass),tune=False,ratio_enabled=False,paper_mode='논문 미확인',wave='단방향',hz='',
+            water_mass=str(pd.mass),freeboard=str(pd.freeboard),tune=False,ratio_enabled=False,paper_mode='논문 미확인',wave='단방향',hz='',
             amplitude='',xi='',loss_mode='직접 ξ',cycles='',tube_length='')
         for key in ('start','end'):data['values'][key+'_ramp_on']=False
         data['groups']['floor']={'m':'2.2,2.2,2.2,2.2','k':'1505.10,1505.10,1505.10,1505.10','y':'1505.10,1505.10,1505.10,1505.10','h':'.381,.381,.381,.381'}
