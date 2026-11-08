@@ -223,6 +223,7 @@ class Damper:
     # 기본 추가 손실은 0이다. 실측 등 별도 근거가 있는 국부 손실만 명시적으로 입력한다.
     xi_scope: str = 'total'  # 기존 저장 ξ는 총손실 의미를 유지. local은 오리피스 등 국부 손실.
     pipe_loss: float = 0.0
+    pipe_loss_direct: bool = False  # False: 예전 U형 기준값의 기울기 보정. True: 현재 형상의 가정 계수 그대로 합산.
     leg_length: float | None = None  # 각 기둥의 관 축 길이[m]. None은 기존 h+여유높이 방식.
     freeboard: float = 0.12  # 정지 수면 위 여유 높이 [m]
 
@@ -247,11 +248,21 @@ class Damper:
         if self.xi is not None:
             if not np.isfinite(self.xi) or self.xi<0:raise ValueError('직접 ξ는 유한한 0 이상 값이어야 합니다.')
             return float(self.xi)+(self.effective_pipe_loss if self.xi_scope=='local' else 0.)  # 총손실은 추가 손실을 중복 합산하지 않는다.
-        return orifice_loss(self.beta)+self.effective_pipe_loss
+        return self.xi_orifice+self.effective_pipe_loss
+
+    @property
+    def xi_orifice(self):
+        """개구비 경험식의 계수. 직접 ξ 모드에서는 적용하지 않는다."""
+        return orifice_loss(self.beta) if self.xi is None else None
+
+    @property
+    def xi_total(self):
+        return self.loss
 
     @property
     def effective_pipe_loss(self):
         # 기울인 기둥은 엘보가 tilt°만 꺾인다(안쪽 기울기는 90° 초과). 수직(90°)이면 입력값 그대로.
+        if self.pipe_loss_direct:return self.pipe_loss
         return self.pipe_loss*bend_loss_factor(self.tilt) if is_tilted(self) else self.pipe_loss
 
     @property
@@ -306,7 +317,7 @@ def equivalent_u(d):
 
 @lru_cache(maxsize=256)
 def damper_frequency(d,gravity):
-    geometry=replace(d,beta=1.,xi=None,xi_scope='total',pipe_loss=0.,angle=0.,reverse=False)
+    geometry=replace(d,beta=1.,xi=None,xi_scope='total',pipe_loss=0.,pipe_loss_direct=False,angle=0.,reverse=False)
     return _geometry_frequency(geometry,gravity)
 
 
@@ -401,6 +412,20 @@ def column_water_heights(d):
     return rest,np.full(len(up),d.diameter/2),tops
 
 
+def building_input_summary(b,d):
+    """실제 계산에 쓰는 층별 질량과 강성으로 설명값을 구한다."""
+    # 질량비 분모는 장치 없는 건물의 전체 층질량. 지붕 질량·모드 유효질량 기준과 구분한다.
+    masses,_,_,_=b.floor_data()
+    total=float(np.sum(masses))
+    frequency=tuning_frequency(b)
+    damping=("층간 감쇠계수 직접 입력" if b.damping_mode=='직접 계수'
+             else f'{b.damping_mode} · 입력 감쇠비 {100*b.damping:g}%')
+    return (f'건물 총질량 {total:,.6g} kg · 물 {d.mass:,.6g} kg'
+            f'\n물/건물 전체 질량비 {100*d.mass/total:.4g}% (물·빈 관 제외한 건물 기준)'
+            f'\nX방향 1차 {frequency:.5g} Hz · 주기 {1/frequency:.5g} s'
+            f'\n{damping}\n질량·강성·감쇠는 입력 조건이며 실측 보정 여부를 별도로 확인해야 합니다.')
+
+
 def column_surface_text(d,b):
     rest,lower,upper=column_water_heights(d)
     low,high=1000*np.min(rest),1000*np.max(rest)
@@ -412,7 +437,7 @@ def column_surface_text(d,b):
 
 @lru_cache(maxsize=512)
 def validate_column_spacing(d):
-    geometry=replace(d,beta=1.,xi=None,xi_scope='total',pipe_loss=0.,angle=0.,reverse=False)
+    geometry=replace(d,beta=1.,xi=None,xi_scope='total',pipe_loss=0.,pipe_loss_direct=False,angle=0.,reverse=False)
     return _geometry_spacing(geometry)
 
 
@@ -665,7 +690,7 @@ def laboratory_input(hz, amplitude, mode='가속도 진폭 (g)', cycles=None,ram
 
 
 QUAKE_NOTES={
-    '단방향':'실험실 조화 가진 · 세계 X방향. 진동수와 진폭을 직접 지정합니다. 기본 0.01 g는 실행용 가정값입니다. 건물의 초기 상대 변위·속도는 0입니다.',
+    '단방향':'실험실 조화 가진 · 세계 X방향. 진동수와 진폭을 직접 지정합니다. 0.01 g는 실험 입력값의 예이며 일반 지진의 표준 세기가 아닙니다. 실제 지진 기록과 단일 사인파는 주파수 구성과 지속 시간이 다릅니다. 건물의 초기 상대 변위·속도는 0입니다.',
     '고베지진':'1995년 JMA 고베 남북 실측. 가까운 관측소에서 기록된 급격한 흔들림입니다. 첫 40초를 사용합니다.',
     '멕시코시티 지진':'1985년 호수 퇴적층 관측 특성을 본뜬 합성파입니다. 약 2초 주기 성분을 증폭해 길게 흔들립니다.',
     '엘센트로 지진':'1940년 엘센트로 남북 실측. 기존에 사용한 31.16초 기록입니다.'}
@@ -795,6 +820,7 @@ def metrics(result):
             'peak_reduction_vs_fixed_pct': reduction(peak, 1),
             'rms_reduction_vs_bare_pct': reduction(rms, 0),
             'acceleration_reduction_vs_bare_pct': reduction(acc, 0),
+            'rms_acceleration_reduction_vs_bare_pct': reduction(acc_rms, 0),
             'peak_water_displacement_m': float(np.max(np.abs(result.get('levels',result['state'][:,2]))))}
 
 
@@ -891,7 +917,7 @@ def draw_result(fig, axes, b, d, r, title):
             ax.axvline(r['failure_time'], color='red', ls=':')
     info.axis('off')
     m = metrics(r)
-    text = (f'물 질량: {d.mass:.3f} kg ({100*d.mass/b.mass:.1f}%)\n'
+    text = (f'물 질량: {d.mass:.3f} kg (건물 전체 대비 {100*d.mass/np.sum(b.floor_data()[0]):.3g}%)\n'
             f'관 질량: {b.container_mass:.3f} kg\n'
             f'건물 / 액체 고유진동수: {b.frequency:.3f} / {d.frequency:.3f} Hz\n'
             f'전체 물기둥 길이 L: {d.length:.3f} m\n')
@@ -917,7 +943,7 @@ def save_result(folder, b, d, r, fig, title):
     payload = {'building': asdict(b), 'damper': asdict(d), 'input': title,
                'valid': r['valid'], 'failure_time_s': r['failure_time'],
                'metric_array_order': ['bare', 'fixed_mass', 'tlcd'], 'metrics': metrics(r)}
-    payload['orifice']=dict(mode='직접 ξ' if d.xi is not None else '개구비',xi_scope=d.xi_scope,beta_applied=d.xi is None,beta=d.beta,xi=d.loss,pipe_loss=d.pipe_loss if d.xi is None or d.xi_scope=='local' else None,velocity_basis='mean conduit velocity',model='orifice + explicit additional local loss; branching applicability unvalidated')
+    payload['orifice']=dict(xi_orifice=d.xi_orifice,xi_total=d.xi_total,pipe_loss_direct=d.pipe_loss_direct,mode='직접 ξ' if d.xi is not None else '개구비',xi_scope=d.xi_scope,beta_applied=d.xi is None,beta=d.beta,xi=d.loss,pipe_loss=d.pipe_loss if d.xi is None or d.xi_scope=='local' else None,velocity_basis='mean conduit velocity',model='orifice + explicit additional local loss; branching applicability unvalidated')
     payload['installed']=r.get('installed',True)
     if not payload['installed']: payload['damper']=None
     payload['source'] = r.get('source')
@@ -1117,10 +1143,12 @@ def _close_optimizer_pool():
 
 def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,floors=None,
         cache=None,stop=None,progress=None,air_mode='stop',amplitudes=None,laboratory=None,
-        tilts=None,column_counts=None,workers=None):
+        tilts=None,column_counts=None,workers=None,pipe_losses=None):
     """같은 계산식을 후보별 독립 프로세스에 나눈다. workers=1이면 기존 순차 계산.
     캐시가 있는 후보는 부모에서 재사용하고, 중지는 각 후보의 계산 경계에서 처리한다.
     """
+    if pipe_losses is not None and d.xi is not None and d.xi_scope=='total':
+        raise ValueError('직접 총손실 ξ 모드에서는 pipe_loss를 탐색할 수 없습니다.')
     import os,hashlib,multiprocessing
     from concurrent.futures import ProcessPoolExecutor,wait,FIRST_COMPLETED
     from collections import Counter
@@ -1128,20 +1156,22 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
         lengths=list(lengths),require_peak=require_peak,ratios=None if ratios is None else list(ratios),
         floors=None if floors is None else list(floors),air_mode=air_mode,
         amplitudes=None if amplitudes is None else list(amplitudes),laboratory=laboratory,
-        tilts=None if tilts is None else list(tilts),column_counts=None if column_counts is None else list(column_counts))
+        tilts=None if tilts is None else list(tilts),column_counts=None if column_counts is None else list(column_counts),
+        pipe_losses=None if pipe_losses is None else list(pipe_losses))
     combinations=list(itertools.product(arguments['betas'],arguments['angles'],arguments['lengths'],
         [None] if arguments['ratios'] is None else arguments['ratios'],
         [b.floor_data()[3]] if arguments['floors'] is None else arguments['floors'],
         [None] if arguments['amplitudes'] is None else arguments['amplitudes'],
         [d.tilt] if arguments['tilts'] is None else arguments['tilts'],
-        [d.columns] if arguments['column_counts'] is None else arguments['column_counts']))
+        [d.columns] if arguments['column_counts'] is None else arguments['column_counts'],
+        [d.pipe_loss] if arguments['pipe_losses'] is None else arguments['pipe_losses']))
     count=len(combinations)
     available=getattr(os,'process_cpu_count',os.cpu_count)() or 1
     # 이력 배열의 합계 예산을 약 1 GiB로 잡는다. 프로세스·라이브러리 자체 메모리는 별도다.
     memory_per_worker=max(1,8*len(t)*(32*len(b.floor_data()[0])+10*d.columns+128))
     maximum=min(8,max(1,available-1),max(1,(1024**3)//memory_per_worker))
     requested=maximum if workers is None else max(1,min(int(workers),maximum))
-    axes=(arguments['betas'],arguments['angles'],arguments['lengths'],arguments['ratios'] or [],arguments['floors'] or [],arguments['amplitudes'] or [],arguments['tilts'] or [],arguments['column_counts'] or [])
+    axes=(arguments['betas'],arguments['angles'],arguments['lengths'],arguments['ratios'] or [],arguments['floors'] or [],arguments['amplitudes'] or [],arguments['tilts'] or [],arguments['column_counts'] or [],arguments['pipe_losses'] or [])
     finite_inputs=all(value is None or np.isfinite(float(value)) for axis in axes for value in axis)
     if count<16 or requested==1 or not finite_inputs or multiprocessing.current_process().name!='MainProcess':
         if progress is not None:progress['workers']=1
@@ -1151,9 +1181,9 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
             raise ValueError('가속도 진폭 탐색에는 단방향 가속도 입력 조건이 필요합니다.')
     input_key=hashlib.sha256(arguments['t'].tobytes()+arguments['ag'].tobytes()+repr(laboratory).encode()).digest()
     def key_for(combination):
-        beta,angle,B,ratio,floor,amplitude,tilt,columns=combination
+        beta,angle,B,ratio,floor,amplitude,tilt,columns,pipe_loss=combination
         return (float(beta),float(angle),float(B),None if ratio is None else float(ratio),float(floor),
-            amplitude,air_mode,input_key,float(tilt),float(columns))
+            amplitude,air_mode,input_key,float(tilt),float(columns),float(pipe_loss),arguments['pipe_losses'] is not None)
     keys=[key_for(c) for c in combinations]
     memo={} if cache is None else cache
     answers={key:dict(memo[key]) for key in keys if key in memo}
@@ -1180,7 +1210,7 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
                     _OPTIMIZER_WORKERS=requested
                 _OPTIMIZER_CANCEL.clear()
                 # 같은 관 치수가 이웃한 작업에 묶이도록 정렬한다.
-                missing.sort(key=lambda c:tuple(-1. if c[i] is None else float(c[i]) for i in (2,3,6,7,4,5,0,1)))
+                missing.sort(key=lambda c:tuple(-1. if c[i] is None else float(c[i]) for i in (2,3,6,7,4,5,8,0,1)))
                 chunk_size=max(1,min(8,(len(missing)+requested*4-1)//(requested*4)))
                 chunks=iter([missing[i:i+chunk_size] for i in range(0,len(missing),chunk_size)])
                 context=hashlib.sha256(input_key+repr((b,d)).encode()).digest()
@@ -1216,7 +1246,11 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
     return sorted(rows,key=lambda row:(row['eligible'],row['rms_pct'] if row['rms_pct'] is not None else -np.inf),reverse=True)
 
 
-def _search_designs_serial(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,floors=None,cache=None,stop=None,progress=None,air_mode='stop',amplitudes=None,laboratory=None,tilts=None,column_counts=None,_combinations=None,_state=None):
+def _search_designs_serial(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,floors=None,cache=None,stop=None,progress=None,air_mode='stop',amplitudes=None,laboratory=None,tilts=None,column_counts=None,_combinations=None,_state=None,pipe_losses=None):
+    if pipe_losses is not None and d.xi is not None and d.xi_scope=='total':
+        raise ValueError('직접 총손실 ξ 모드에서는 pipe_loss가 적용되지 않아 탐색할 수 없습니다.')
+    direct_pipe=pipe_losses is not None
+    pipe_losses=[d.pipe_loss] if pipe_losses is None else list(pipe_losses)
     tilts=[d.tilt] if tilts is None else list(tilts)
     column_counts=[d.columns] if column_counts is None else list(column_counts)
     rows=[]
@@ -1227,21 +1261,21 @@ def _search_designs_serial(b,d,t,ag,betas,angles,lengths,require_peak=True,ratio
     import hashlib
     input_key=hashlib.sha256(np.asarray(t).tobytes()+np.asarray(ag).tobytes()+repr(laboratory).encode()).digest()
     reused=0
-    total=len(betas)*len(angles)*len(lengths)*(1 if ratios is None else len(ratios))*(1 if floors is None else len(floors))*len(amplitudes)*len(tilts)*len(column_counts)
+    total=len(betas)*len(angles)*len(lengths)*(1 if ratios is None else len(ratios))*(1 if floors is None else len(floors))*len(amplitudes)*len(tilts)*len(column_counts)*len(pipe_losses)
     if _combinations is not None:total=len(_combinations)
     def report():
         if progress is not None:progress.update(total=total,completed=len(rows),reused=reused)
     report()
     combinations=itertools.product(betas,angles,lengths,
-        [None] if ratios is None else ratios,[b.floor_data()[3]] if floors is None else floors,amplitudes,tilts,column_counts) if _combinations is None else _combinations
-    for beta,angle,B,ratio,floor,amplitude,tilt,columns in combinations:
+        [None] if ratios is None else ratios,[b.floor_data()[3]] if floors is None else floors,amplitudes,tilts,column_counts,pipe_losses) if _combinations is None else _combinations
+    for beta,angle,B,ratio,floor,amplitude,tilt,columns,pipe_loss in combinations:
         if stop is not None and stop.is_set():break
-        key=(float(beta),float(angle),float(B),None if ratio is None else float(ratio),float(floor),amplitude,air_mode,input_key,float(tilt),float(columns))
+        key=(float(beta),float(angle),float(B),None if ratio is None else float(ratio),float(floor),amplitude,air_mode,input_key,float(tilt),float(columns),float(pipe_loss),direct_pipe)
         # cache는 동일 건물·장치·가진을 고정한 한 탐색 창에서만 공유한다.
         row=dict(cache[key]) if cache is not None and key in cache else None
         if row is not None:reused+=1
         if row is None:
-            row=dict(tilt=float(tilt),columns=float(columns),width_cm=None,depth_cm=None,height_cm=None,amplitude_g=amplitude,actual_peak_g=None,air_mode=air_mode,beta=float(beta),angle=float(angle),B=float(B),r=ratio,n=float(floor),fluid_scope='물 모델',internal_steps=None,peak_displacement_m=None,rms_displacement_m=None,peak_acceleration_m_s2=None,rms_acceleration_m_s2=None,peak_acceleration_reduction_pct=None,peak_water_m=None,
+            row=dict(pipe_loss=float(pipe_loss),pipe_loss_direct=direct_pipe or d.pipe_loss_direct,xi_orifice=None,xi_total=None,actual_r=None,rms_acceleration_reduction_pct=None,tilt=float(tilt),columns=float(columns),width_cm=None,depth_cm=None,height_cm=None,amplitude_g=amplitude,actual_peak_g=None,air_mode=air_mode,beta=float(beta),angle=float(angle),B=float(B),r=ratio,n=float(floor),fluid_scope='물 모델',internal_steps=None,peak_displacement_m=None,rms_displacement_m=None,peak_acceleration_m_s2=None,rms_acceleration_m_s2=None,peak_acceleration_reduction_pct=None,peak_water_m=None,
                 h=None,diameter_m=None,area_m2=None,orifice_m2=None,mass_kg=d.mass,
                 rms_pct=None,peak_pct=None,status='',reason='',eligible=False,failure_time_s=None,completion_pct=0.,initial_h_m=None,initial_D_m=None,B_limit_m=None)
             try:
@@ -1261,9 +1295,9 @@ def _search_designs_serial(b,d,t,ag,betas,angles,lengths,require_peak=True,ratio
                     raise ValueError(str(cached_geometry))
                 model,test=cached_geometry
                 model=replace(model,mount=int(floor))
-                test=replace(test,beta=float(beta),angle=float(angle))
+                test=replace(test,beta=float(beta),angle=float(angle),pipe_loss=float(pipe_loss),pipe_loss_direct=direct_pipe or d.pipe_loss_direct)
                 validate(model,test)
-                row.update(r=test.frequency/tuning_frequency(b) if ratio is None else float(ratio),h=test.h,diameter_m=test.diameter,
+                row.update(xi_orifice=test.xi_orifice,xi_total=test.xi_total,actual_r=test.frequency/tuning_frequency(b),r=test.frequency/tuning_frequency(b) if ratio is None else float(ratio),h=test.h,diameter_m=test.diameter,
                     area_m2=test.area,orifice_m2=test.area*test.beta if test.xi is None else None,initial_h_m=test.h,initial_D_m=test.diameter,
                     B_limit_m=test.length-test.diameter if equivalent_u(test) else None)
                 extent=device_extent(test)   # 같은 공간 비교용: 장치 가로·세로·높이 (cm)
@@ -1285,6 +1319,7 @@ def _search_designs_serial(b,d,t,ag,betas,angles,lengths,require_peak=True,ratio
 
                 # 전체 기록을 완료한 경우에만 RMS·최대값을 성능 점수로 사용한다.
                 m=metrics(result)
+                row['peak_water_m']=float(np.nanmax(np.abs(result['levels'])))
                 row['internal_steps']=result['computational_work']['internal_steps']
                 if m is None:
                     row.update(status='초기 충수 조건 미달' if result['failure_time']<=t[0] else result.get('failure_kind','수면 한계'),
@@ -1292,7 +1327,7 @@ def _search_designs_serial(b,d,t,ag,betas,angles,lengths,require_peak=True,ratio
                         completion_pct=100*(result['failure_time']-t[0])/(t[-1]-t[0]))
                 else:
                     peak=m['peak_reduction_vs_bare_pct'];score=m['rms_reduction_vs_bare_pct']
-                    row.update(peak_displacement_m=m['peak_displacement_m'][2],rms_displacement_m=m['rms_displacement_m'][2],peak_acceleration_m_s2=m['peak_absolute_acceleration_m_s2'][2],rms_acceleration_m_s2=m['rms_absolute_acceleration_m_s2'][2],peak_acceleration_reduction_pct=m['acceleration_reduction_vs_bare_pct'],peak_water_m=m['peak_water_displacement_m'],completion_pct=100.,rms_pct=score,peak_pct=peak,status='기준 응답 0' if score is None else '최대 변위 악화' if peak is not None and peak<0 else '정상')
+                    row.update(peak_displacement_m=m['peak_displacement_m'][2],rms_displacement_m=m['rms_displacement_m'][2],peak_acceleration_m_s2=m['peak_absolute_acceleration_m_s2'][2],rms_acceleration_m_s2=m['rms_absolute_acceleration_m_s2'][2],peak_acceleration_reduction_pct=m['acceleration_reduction_vs_bare_pct'],rms_acceleration_reduction_pct=m['rms_acceleration_reduction_vs_bare_pct'],peak_water_m=m['peak_water_displacement_m'],completion_pct=100.,rms_pct=score,peak_pct=peak,status='기준 응답 0' if score is None else '최대 변위 악화' if peak is not None and peak<0 else '정상')
             except ValueError as error:
                 row.update(status='계산 오류' if '수렴' in str(error) else '잘못된 설계',reason=str(error))
             except (np.linalg.LinAlgError,FloatingPointError) as error:
@@ -1303,12 +1338,45 @@ def _search_designs_serial(b,d,t,ag,betas,angles,lengths,require_peak=True,ratio
         rows.append(row);report()
     return sorted(rows,key=lambda r:(r['eligible'],r['rms_pct'] if r['rms_pct'] is not None else -np.inf),reverse=True)
 
+def loss_sensitivity(b,d,t,ag,pipe_losses=(1.,2.,3.,4.),mode='same',*,air_mode='stop',stop=None,progress=None):
+    """동일 입력·물 질량·조율비에서 형상별 가정 관 손실을 비교한다.
+    mode=same: 모든 형상 같은 계수, u_reference: 기본 U만 2.4.
+    새 손실 공식은 없으며 현재 형상 계수를 직접 합산한다. 유로별 실측 보정은 아니다.
+    """
+    if d.xi is not None:
+        raise ValueError('형상별 관 손실 비교는 개구비 모드에서 실행하세요. 직접 총 ξ에는 관 손실을 추가하지 않습니다.')
+    losses=sorted(set(float(value) for value in pipe_losses))
+    if not losses or not np.isfinite(losses).all() or min(losses)<0:
+        raise ValueError('관 손실계수는 쉼표로 구분한 유한한 0 이상 숫자여야 합니다.')
+    if mode not in ('same','u_reference'):raise ValueError('알 수 없는 손실 비교 방식입니다.')
+    ratio=d.frequency/tuning_frequency(b)
+    count=max(3,d.columns)
+    # V형은 현재 경사각을 사용한다. 수직 상태로 연 창에서는 60° 예제를 명시적으로 적용한다.
+    tilt=d.tilt if not math.isclose(d.tilt,90.) else 60.
+    variants=[('U형',replace(d,shape='U형',tilt=90.,bores=(),tops=())),
+        ('V형',replace(d,shape='V형',tilt=tilt,bores=(),tops=())),
+        ('피자 거치대',replace(d,shape='피자 거치대',columns=count,tilt=90.,bores=(),tops=())),
+        ('다기둥형',replace(d,shape='다기둥형',columns=count,tilt=90.,bores=(),tops=()))]
+    rows=[];total=sum(1 if mode=='u_reference' and label=='U형' else len(losses) for label,_ in variants)
+    for label,variant in variants:
+        if stop is not None and stop.is_set():break
+        selected=[2.4] if mode=='u_reference' and label=='U형' else losses
+        # 한 형상의 모든 계수를 한 번에 호출하여 조율값과 기준 건물 계산을 재사용한다.
+        group=search_designs(b,variant,t,ag,[d.beta],[d.angle],[d.B],False,[ratio],[b.floor_data()[3]],
+            stop=stop,air_mode=air_mode,workers=1,pipe_losses=selected)
+        for row in group:
+            row.update(shape_label=label,comparison=mode,columns=column_count(variant),tilt=variant.tilt)
+            rows.append(row)
+        if progress is not None:progress.update(completed=len(rows),total=total)
+    return rows
+
+
 def export_optimizer_report(path,results,context):
     """고정 조건을 한 번 표시하고 실제 탐색변수만 RMS 순위표에 내보낸다."""
     import os,tempfile
     path=Path(path).with_suffix('.csv')
     labels={'r':'조율비 r','beta':'오리피스 개구비 β','angle':'설치 방향 각도 (°)',
-        'B':'수평 관 길이 B (m)','n':'설치 층','tilt':'기둥 기울기 (°)','columns':'기둥 수'}
+        'B':'수평 관 길이 B (m)','n':'설치 층','tilt':'기둥 기울기 (°)','columns':'기둥 수','pipe_loss':'관 손실계수 pipe_loss'}
     grids=context.get('grids',{})
     varied=[key for key in labels if len(set(grids.get(key,[])))>1]
     finite=lambda row:row.get('rms_pct') is not None and np.isfinite(row['rms_pct'])
@@ -1321,16 +1389,18 @@ def export_optimizer_report(path,results,context):
     building=context.get('building',{});damper=context.get('damper',{});source=context.get('source_metadata',{})
     model=Building(**building) if building else None
     device=Damper(**damper) if damper else None
-    planned=int(np.prod([len(values) for values in grids.values()])) if grids else len(results)
+    planned=context.get('planned_total',int(np.prod([len(values) for values in grids.values()])) if grids else len(results))
     conditions=[('정렬 기준','RMS 지붕 상대변위 저감률 내림차순 · 양수는 저감, 음수는 응답 증가'),
         ('결과 수',f"평가한 설계 {len(results)} / 계획 {planned}개 · 중지된 탐색 여부: {'예' if context.get('stopped') else '아니오'}"),
+        ('비교 방식',context.get('comparison','최적 설계 탐색')),
+        ('손실 모델 범위','관 평균속도 기준의 가정 계수. 각 바닥 가지에 공통 적용; 분기·합류의 실제 손실 분포는 미확인'),
         ('가진 조건',context.get('source','')),
         ('평가 시간 (s)',context.get('duration_s','')),
         ('수면 처리',AIR_MODE_LABELS.get(context.get('air_mode'),context.get('air_mode',''))),
         ('최적 선정 조건','최대 변위 악화 제외' if context.get('require_peak') else '최대 변위 악화 허용')]
     if model is not None:
         masses,kx,heights,_=model.floor_data()
-        conditions.extend([('건물 층수',len(masses)),('층별 질량 (kg)',text(masses.tolist())),
+        conditions.extend([('건물 층수',len(masses)),('건물 전체 질량 (kg)',float(np.sum(masses))),('층별 질량 (kg)',text(masses.tolist())),
             ('X방향 층별 강성 (N/m)',text(kx.tolist())),
             ('Y방향 층별 강성 (N/m)',text(model.stories_y or tuple(kx))),
             ('층별 높이 (m)',text(heights.tolist())),
@@ -1342,7 +1412,12 @@ def export_optimizer_report(path,results,context):
         conditions.extend([('관 형상',SHAPE_DISPLAY.get(device.shape,'기울인 U형 (V형)')),
             ('액체 질량 (kg)',ranked[0].get('mass_kg',device.mass)),
             ('추가 관 손실계수 (입력)',device.pipe_loss),
+            ('관 손실 해석','현재 형상 가정값 직접 합산' if any(row.get('pipe_loss_direct') for row in ranked) else '기존 U형 기준값에 기울기 보정'),
             ('관 끝 길이 (m)','자동 계산' if device.leg_length is None else device.leg_length)])
+        if model is not None:
+            conditions.extend([('물/건물 전체 질량비 (%)',100*device.mass/np.sum(model.floor_data()[0])),
+                ('X방향 1차 고유진동수 (Hz)',tuning_frequency(model)),
+                ('모델 해석 범위','선형 전단건물·1차원 물기둥 근사. 감쇠·손실계수는 입력 가정이며 별도 보정 필요')])
         if device.tops:conditions.append(('기둥별 관 끝 높이 (m)',text(device.tops)))
         elif device.leg_length is None:conditions.append(('정지 수면 위 여유 (m)',device.freeboard))
         if device.xi is not None:conditions.append(('직접 손실계수 ξ',f'{device.xi:g} · '+('총손실' if device.xi_scope=='total' else '국부손실')))
@@ -1359,11 +1434,16 @@ def export_optimizer_report(path,results,context):
             conditions.append(('기둥 수',2));continue
         if key in varied:
             step=values[1]-values[0]
-            conditions.append((label+' 탐색 범위',f'{text(values[0])} ~ {text(values[-1])} · 간격 {text(step)} · {len(values)}개'))
+            if len(values)>2 and not np.allclose(np.diff(values),step):
+                conditions.append((label+' 실제 비교값',text(values)))
+            else:
+                conditions.append((label+' 탐색 범위',f'{text(values[0])} ~ {text(values[-1])} · 간격 {text(step)} · {len(values)}개'))
         else:conditions.append((label+' (고정)',values[0]))
     conditions.append(('물높이·안지름','조율비·관 길이 등에 따라 물 질량을 유지하도록 자동 계산'))
-    columns=[('rank','RMS 순위')]+[(key,labels[key]) for key in varied]+[
+    columns=[('rank','RMS 순위')]+([('shape_label','관 형상'),('h','실제 환산 물높이 h (m)'),('diameter_m','실제 관 안지름 (m)'),('mass_kg','액체 질량 (kg)')] if any('shape_label' in row for row in ranked) else [])+[(key,labels[key]) for key in varied]+[
         ('rms_pct','RMS 변위 저감률 (%)'),('peak_pct','최대 변위 저감률 (%)'),
+        ('peak_acceleration_reduction_pct','최대 가속도 저감률 (%)'),('rms_acceleration_reduction_pct','RMS 가속도 저감률 (%)'),
+        ('peak_water_m','최대 수면 변위 (m)'),('actual_r','실제 조율비'),('xi_orifice','오리피스 손실 ξ'),('xi_total','실제 총손실 ξ'),
         ('eligible','최적 선정 가능'),('status','계산 상태')]
     if any(row.get('failure_time_s') is not None or row.get('reason') for row in ranked):
         columns.extend([('failure_time_s','중단 시각 (s)'),('completion_pct','계산 완료율 (%)'),('reason','중단·제외 원인')])
@@ -1483,14 +1563,14 @@ def quick_verify_best(b,d,t,ag,rows,air_mode='stop',stop=None,memo=None):
         row.update(check_status='미대상',check_rms_delta_pp=None,check_peak_delta_pp=None)
     best=next((row for row in rows if row['eligible']),None)
     if best is None:return
-    key=tuple(best[k] for k in ('beta','angle','B','r','n','amplitude_g','tilt','columns'))
+    key=tuple(best[k] for k in ('beta','angle','B','r','n','amplitude_g','tilt','columns','pipe_loss','pipe_loss_direct'))
     if memo is not None and key in memo:
         best.update(memo[key]);return
     deadline=perf_counter()+1.
     try:
         if stop is not None and stop.is_set():raise TimeoutError('중지 요청')
         model,trial=search_trial(b,design_variant(d,best['tilt'],best['columns']),best['B'],best['r'],best['n'])
-        trial=replace(trial,beta=best['beta'],angle=best['angle'])
+        trial=replace(trial,beta=best['beta'],angle=best['angle'],pipe_loss=best['pipe_loss'],pipe_loss_direct=best.get('pipe_loss_direct',d.pipe_loss_direct))
         result=simulate_space(model,trial,t,ag,air_mode=air_mode,_step_scale=.5,_deadline=deadline,_cancel=stop)
         if perf_counter()>=deadline:raise TimeoutError('추가 확인 시간 제한')
         measure=metrics(result)
@@ -1513,7 +1593,7 @@ def quick_verify_best(b,d,t,ag,rows,air_mode='stop',stop=None,memo=None):
 def select_performance_rows(rows,xkey,ykey,fixed,projection=False):
     """지도 선택만 수행한다. 값의 보간이나 재계산 없이 실제 행을 반환한다."""
     if not rows:return [],dict(fixed)
-    others=[key for key in ('r','beta','angle','B','n','amplitude_g','tilt','columns') if key in fixed and key not in (xkey,ykey)]
+    others=[key for key in ('r','beta','angle','B','n','amplitude_g','tilt','columns','pipe_loss') if key in fixed and key not in (xkey,ykey)]
     if projection:
         grouped={}
         for row in rows:
@@ -2429,16 +2509,16 @@ def tanveer_known_conditions():
         source='https://doi.org/10.1371/journal.pone.0224436')
 
 
-STABLE_EXAMPLE_ACCEL_G = .001  # 안정 예제의 단방향 입력 진폭[g]
+STABLE_EXAMPLE_ACCEL_G = .01  # 안정 예제의 단방향 입력 진폭[g]
 STABLE_TUNING_RATIO = .98   # 안정 예제에서만 사용하는 조율비
 
 def stable_example():
     """6×5 m, 층고 3.2 m의 유연한 8층 철골 전단 건물을 가정한 예제.
     질량은 슬래브와 부가 질량의 가정값이며, 강성은 이상화한 기둥 계산값이다. 실측 자료가 아니다.
     기준 건물 각 모드 감쇠비 5%, 조율비 .98, 설치 8층 고정으로 시작한다.
-    단방향 0.001 g·39주기·시작/종료 3주기 quintic 램프를 사용한다.
-    B=.9~1.1 m, beta=.2~.8, 기둥 기울기 45~90°, 설치 방향 0~60°를 기본 범위로 한다.
-    대표 113개 조합에서 약 5% 중단을 목표로 한다. 다른 가진·조율비·기둥 수·격자에서는 비율이 달라진다.
+    단방향 0.01 g·39주기·시작/종료 3주기 quintic 램프를 사용한다.
+    B=.9~1.05 m, beta=.1~.3, 기둥 기울기 45~90°, 설치 방향 0~60°를 기본 범위로 한다.
+    관 손실 2.4의 대표 113개 조합에서 약 5% 수면 중단을 목표로 한다. 다른 가진·조율비·기둥 수·격자에서는 비율이 달라진다.
     """
     width,depth,height=6.,5.,3.2
     # 가정: 콘크리트 밀도 2400 kg/m³, 슬래브 두께 0.15 m. 한 층 슬래브 질량=10800 kg.
@@ -2456,11 +2536,22 @@ def stable_example():
         damping=.05,damping_mode='모드 감쇠',container_mass=40.)  # 빈 관·지지물 40 kg도 입력 가정.
     building=replace(building,frequency=tuning_frequency(building))
     # 물 150 kg, 조율비 .98. 길이에 맞춰 단면적과 안지름을 함께 계산한다.
-    B=1.
+    B=.975
     length=2*G/(2*np.pi*STABLE_TUNING_RATIO*building.frequency)**2
     area=150./(1000*length)
+    # 관 끝은 정지 수면보다 14.3 cm 위. 수면 제한식은 바꾸지 않고 실제 관 여유 치수만 설정한다.
     return building,Damper(B=B,h=(length-B)/2,diameter=math.sqrt(4*area/np.pi),
-        freeboard=.15,beta=.5,pipe_loss=2.4)
+        freeboard=.143,beta=.2,pipe_loss=2.4,pipe_loss_direct=True)
+
+
+def default_search_ranges(building):
+    """안정 예제에서 시험한 범위를 탐색 창 초기값으로 사용한다. 사용자가 이후 수정할 수 있다.
+    약 5% 중단은 r=.98·설치 지붕·관 손실 2.4의 대표 격자에 대한 수치이며,
+    r·층·기둥 수·손실계수 범위를 넓히면 같은 중단률을 보장하지 않는다.
+    """
+    return {'r':(.9,1.,.05),'beta':(.1,.3,.1),'angle':(0.,60.,30.),
+        'B':(.9,1.05,.075),'n':(1,len(building.floor_data()[0]),1),
+        'tilt':(45.,90.,22.5),'columns':(2,4,1),'pipe_loss':(1.,4.,1.)}
 
 
 def read_settings(path):
@@ -2740,6 +2831,9 @@ def lab(b,d,t,ag,title,out):
     pipe_loss_var=tk.StringVar(value=f'{d.pipe_loss:g}')
     ttk.Label(precision_page,text='추가 국부 손실계수 (기본 0)').pack(anchor='w')
     ttk.Entry(precision_page,textvariable=pipe_loss_var).pack(fill='x')
+    pipe_direct_var=tk.BooleanVar(value=d.pipe_loss_direct)
+    ttk.Checkbutton(precision_page,text='현재 형상의 가정 계수로 직접 합산',variable=pipe_direct_var).pack(anchor='w')
+    ttk.Label(precision_page,text='체크 OFF: 기존 U형 기준값에 기울기 보정. ON: ξ총=ξ오리피스+관 손실. 직접 총 ξ에는 추가하지 않음. 2.4도 특정 실험의 참고값입니다.',wraplength=280).pack(anchor='w')
     ttk.Label(precision_page,text='근거가 있는 국부 손실만 입력하세요. 총손실 ξ에는 중복으로 더하지 않습니다.',wraplength=280,foreground='#30566a').pack(anchor='w')
     ramp_profile_var=tk.StringVar(value='quintic')
     ttk.Label(precision_page,text='램프 방식 · quintic(기존) / cosine(병합)').pack(anchor='w')
@@ -2810,10 +2904,12 @@ def lab(b,d,t,ag,title,out):
     ratio_enabled=tk.BooleanVar(value=False)
     ttk.Label(freq_page,text='현재 조율비 (X 1차 모드 기준)').pack(anchor='w')
     ttk.Label(freq_page,textvariable=tune_ratio).pack(anchor='w')
+    building_note=tk.StringVar(value=building_input_summary(b,d))
+    ttk.Label(freq_page,textvariable=building_note,wraplength=280,foreground='#30566a').pack(anchor='w',pady=5)
     water_var=tk.StringVar(value=f'{d.mass:.9g}')
     ttk.Label(pipe_page,text='총 물 질량 (kg)').pack(anchor='w')
     ttk.Entry(pipe_page,textvariable=water_var,width=10).pack(anchor='w')
-    ttk.Label(pipe_page,text='오리피스 손실만 근사 · 분기관 경험식 적용 불확실',wraplength=250).pack(anchor='w')
+    ttk.Label(pipe_page,text='오리피스 + 입력한 관 손실 근사 · 분기 실측 보정 미포함',wraplength=250).pack(anchor='w')
     air_mode_var=tk.StringVar(value=AIR_MODE_LABELS['stop'])
     ttk.Label(pipe_page,text='수면 한계 처리').pack(anchor='w')
     ttk.Label(pipe_page,text='수평관 천장 도달 시 중단').pack(anchor='w')
@@ -3445,6 +3541,7 @@ def lab(b,d,t,ag,title,out):
             vals['xi_scope']=xi_scope_var.get()
             vals['xi']=float(xi_var.get()) if loss_mode_var.get()=='직접 ξ' else None
             vals['pipe_loss']=float(pipe_loss_var.get())
+            vals['pipe_loss_direct']=pipe_direct_var.get()
             vals['freeboard']=float(freeboard_var.get())
             raw=replace(d,**vals); validate(target_b,raw)
             kind=kind_var.get()
@@ -3497,6 +3594,7 @@ def lab(b,d,t,ag,title,out):
             fields['h'].set(f'{dam.h*100:.9g}')
             omega_l.set(f'{2*np.pi*dam.frequency:.9g}')
             tune_ratio.set(f'{dam.frequency/b.frequency:.8g}')
+            building_note.set(building_input_summary(target_b,dam))
             # 결과에는 계산에 사용한 건물의 스냅샷을 붙인다. 뒤에 입력을 바꿔도 이전 실험은 유지된다.
             meta['fluid_scope']=r['fluid_scope'];meta['fluid_properties']=r['fluid_properties']
             r['building_spec']=target_b
@@ -3650,16 +3748,16 @@ def lab(b,d,t,ag,title,out):
         viewport.bind('<Configure>',lambda event:viewport.itemconfigure(body_id,width=event.width))
 
         ttk.Label(body,text='다중 물기둥 형상의 r은 최저 유체모드 기준 · 단면을 함께 조정하여 물 질량 유지').pack(anchor='w')
-        labels={'r':'조율비 r','beta':'개구비 β','angle':'설치 각도 θ (°)','B':'수평 길이 B (m)','n':'설치 층 n','tilt':'기둥 기울기 (°)','columns':'기둥 수'}
+        labels={'r':'조율비 r','beta':'개구비 β','angle':'설치 각도 θ (°)','B':'수평 길이 B (m)','n':'설치 층 n','tilt':'기둥 기울기 (°)','columns':'기둥 수','pipe_loss':'관 손실계수 pipe_loss'}
         keys=list(labels)
-        selectable=[key for key in keys if not (key=='beta' and dam.xi is not None) and not (key=='tilt' and (dam.shape=='다기둥형' or dam.separate_u)) and not (key=='columns' and dam.shape!='다기둥형')]
+        selectable=[key for key in keys if not (key=='pipe_loss' and dam.xi is not None and dam.xi_scope=='total') and not (key=='beta' and dam.xi is not None) and not (key=='tilt' and (dam.shape=='다기둥형' or dam.separate_u)) and not (key=='columns' and dam.shape!='다기둥형')]
         ttk.Label(body,text=('가진 진폭 고정: 주 실험실의 가속도 진폭(g)·Hz·램프를 그대로 사용합니다. 진폭은 탐색하지 않습니다.' if amplitude_enabled else '가진 세기는 주 실험실 입력값으로 고정하며 최적화 변수에 포함하지 않습니다.')).pack(anchor='w')
+        ttk.Label(body,text='관 손실 탐색: 현재 형상의 가정 계수를 직접 합산합니다. 예전 프로필의 U형 기준 기울기 보정과 구분합니다.').pack(anchor='w')
         ttk.Label(body,text=f'수면 처리: {optimization_air} · 수평관 천장 도달 시 중단').pack(anchor='w')
         ttk.Label(body,text=f'조율 기준 · 세계 X방향 1차 {tuning_frequency(model):.5g} Hz / 총 물 질량 {dam.mass:.5g} kg 고정').pack(anchor='w')
         controls=ttk.Frame(body);controls.pack(fill='x')
-        field_widgets={};values={};fixed={};defaults={'r':(.9,1.,.05),'beta':(.2,.8,.3),'angle':(0,60,30),
-            'B':(.9,1.1,.1),'n':(1,len(model.floor_data()[0]),1),'tilt':(45.,90.,22.5),'columns':(2,4,1)}
-        initial={'r':dam.frequency/tuning_frequency(model),'beta':dam.beta,'angle':dam.angle,'B':dam.B,'n':model.floor_data()[3],'tilt':dam.tilt,'columns':dam.columns}
+        field_widgets={};values={};fixed={};defaults=default_search_ranges(model)
+        initial={'r':dam.frequency/tuning_frequency(model),'beta':dam.beta,'angle':dam.angle,'B':dam.B,'n':model.floor_data()[3],'tilt':dam.tilt,'columns':dam.columns,'pipe_loss':dam.pipe_loss}
         pinned={key:tk.BooleanVar(value=True) for key in ('r','n')}
         for col,text in enumerate(['변수','시작','끝','간격','고정값','탐색 제외']):
             ttk.Label(controls,text=text).grid(row=0,column=col)
@@ -3686,15 +3784,15 @@ def lab(b,d,t,ag,title,out):
         ttk.Label(axisbar,text='Y축').pack(side='left')
         yp=ttk.Combobox(axisbar,textvariable=yvar,values=selectable,state='readonly',width=8);yp.pack(side='left')
         mode_picker=ttk.Combobox(axisbar,textvariable=view_mode,values=['고정 조건 단면도','전체 최적화 결과 투영도'],state='readonly',width=25);mode_picker.pack(side='left',padx=5)
-        ttk.Label(axisbar,text='r 조율비 / beta 개구비 / angle 각도 / B 길이 / n 층 / tilt 기둥 기울기 / columns 기둥 수').pack(side='left',padx=8)
+        ttk.Label(axisbar,text='r 조율비 / beta 개구비 / angle 각도 / B 길이 / n 층 / tilt 기둥 기울기 / columns 기둥 수 / pipe_loss 관 손실').pack(side='left',padx=8)
         ttk.Checkbutton(body,text='전체 최적화 · 고정하지 않은 활성 변수 범위 탐색',variable=full).pack(anchor='w')
         ttk.Checkbutton(body,text='최대 변위 악화 설계는 최적 선정에서 제외',variable=peak_rule).pack(anchor='w')
         feedback=tk.StringVar();ttk.Label(body,textvariable=feedback,wraplength=1150).pack(fill='x')
-        columns=('amplitude_g','actual_peak_g','air_mode','beta','angle','B','r','width_cm','height_cm','n','tilt','columns','rms_pct','peak_pct','eligible','status','failure_time_s','completion_pct','internal_steps','fluid_scope','reason','check_status','check_rms_delta_pp','check_peak_delta_pp')
+        columns=('pipe_loss','xi_orifice','xi_total','amplitude_g','actual_peak_g','air_mode','beta','angle','B','r','width_cm','height_cm','n','tilt','columns','rms_pct','peak_pct','eligible','status','failure_time_s','completion_pct','internal_steps','fluid_scope','reason','check_status','check_rms_delta_pp','check_peak_delta_pp')
         table_caption=tk.StringVar();ttk.Label(body,textvariable=table_caption,wraplength=1150).pack(fill='x')
         table_frame=ttk.Frame(body);table_frame.pack(fill='x')
         tree=ttk.Treeview(table_frame,columns=columns,show='headings',height=6)
-        for key,title in zip(columns,['입력 진폭(g)','실제 최대가속도(g)','수면 처리','β','θ (°)','B (m)','r','장치 가로 (cm)','장치 높이 (cm)','설치 층','기둥 기울기(°)','기둥 수','RMS 저감 (%)','최대 저감 (%)','최적 선정 가능','상태','중단 시각 s','완료 %','내부 계산 단계','유체 모델 범위','원인','1위 간격 확인(최대 약 1초)','RMS 차이(%p)','최대 차이(%p)']):
+        for key,title in zip(columns,['관 손실(가정)','오리피스 ξ','실제 총손실 ξ','입력 진폭(g)','실제 최대가속도(g)','수면 처리','β','θ (°)','B (m)','r','장치 가로 (cm)','장치 높이 (cm)','설치 층','기둥 기울기(°)','기둥 수','RMS 저감 (%)','최대 저감 (%)','최적 선정 가능','상태','중단 시각 s','완료 %','내부 계산 단계','유체 모델 범위','원인','1위 간격 확인(최대 약 1초)','RMS 차이(%p)','최대 차이(%p)']):
             tree.heading(key,text=title);tree.column(key,width=100 if key!='reason' else 320,stretch=False)
         scroll=ttk.Scrollbar(table_frame,orient='horizontal',command=tree.xview)
         tree.configure(xscrollcommand=scroll.set);scroll.pack(side='bottom',fill='x');tree.pack(fill='x')
@@ -3703,7 +3801,7 @@ def lab(b,d,t,ag,title,out):
         canvas.get_tk_widget().pack(fill='both',expand=True)
         from threading import Event
         import hashlib
-        inspection=tk.StringVar(value='지도에서 칸을 클릭하면 해당 계산의 다섯 설계값과 선정 가능 여부를 확인합니다.')
+        inspection=tk.StringVar(value='지도에서 칸을 클릭하면 해당 계산의 설계값과 선정 가능 여부를 확인합니다.')
         ttk.Label(body,textvariable=inspection,wraplength=1150).pack(fill='x')
         results=[];memo={};traces={};verification_memo={};best_state=[None]
         run_state={'running':False,'context':None,'progress':{},'cancel':Event(),'locked':[]}
@@ -3764,6 +3862,7 @@ def lab(b,d,t,ag,title,out):
                     output[key]=lo+step*np.arange(count)
                 else:output[key]=np.array([float(fixed[key].get())])
                 if not np.isfinite(output[key]).all():raise ValueError('유한한 값을 입력하세요.')
+                if key=='pipe_loss' and min(output[key])<0:raise ValueError('관 손실계수는 0 이상이어야 합니다.')
                 if key=='n' and (np.any(output[key]%1) or min(output[key])<1 or max(output[key])>len(model.floor_data()[0])):raise ValueError('설치 층은 건물 범위 안의 정수입니다.')
             return output
         guide=tk.StringVar()
@@ -3864,13 +3963,14 @@ def lab(b,d,t,ag,title,out):
             best_text=(f"최적 β={best['beta']:.4g}, θ={best['angle']:.4g}°, B={best['B']:.4g} m, r={best['r']:.4g}, n={best['n']:g} / RMS {best['rms_pct']:+.2f}%, 최대 {best['peak_pct']:+.2f}%" if best else '선정 가능한 최적점 없음')
             fluid_note='물 모델'
             if best:best_text+=(f" / 가속도 입력 {best['amplitude_g']:g} g" if best['amplitude_g'] is not None else '')+f", 실제 최대 {best['actual_peak_g']:.6g} g, 수면 처리 {optimization_air}"
+            if best:best_text+=f" / 관 손실 {best['pipe_loss']:g}, 실제 총손실 {best['xi_total']:.5g}"
             if best:best_text+=f" / 기둥 기울기 {best['tilt']:g}°, 기둥 {best['columns']:g}개"
             if best:best_text+=' / '+best.get('check_status','미확인')+(f" · RMS 차이 {best['check_rms_delta_pp']:+.4g}%p" if best.get('check_rms_delta_pp') is not None else '')
             import textwrap
             caption=fluid_note+'\n'+('중지된 탐색 · 완료된 조합만 표시\n' if context.get('stopped') else '')+fixed_text+'\n'+source_description+'\n'+condition+'\n'+best_text
             fig.suptitle('\n'.join(textwrap.fill(line,width=95) for line in caption.splitlines()),fontsize=8)
             if best:
-                rr=traces.get(tuple(best[k] for k in ('beta','angle','B','r','n','amplitude_g','tilt','columns')))
+                rr=traces.get(tuple(best[k] for k in ('beta','angle','B','r','n','amplitude_g','tilt','columns','pipe_loss','pipe_loss_direct')))
                 if rr is not None:
                     trace.plot(rr['t'],rr['state'][:,4]*1000,label='장치 없음')
                     trace.plot(rr['t'],rr['state'][:,0]*1000,label='최적 설계')
@@ -3898,7 +3998,7 @@ def lab(b,d,t,ag,title,out):
             except ValueError as error:feedback.set(str(error));return
             if pending[0]:win.after_cancel(pending[0]);pending[0]=None
             # 계산 시작 시 입력 조건을 복사한다. 이후 결과표·그림·CSV는 이 계산 조건을 참조한다.
-            context=dict(x=xvar.get(),y=yvar.get(),fixed={k:float(g[k][0]) for k in fixed},
+            context=dict(pipe_loss_sweep=is_varied('pipe_loss'),x=xvar.get(),y=yvar.get(),fixed={k:float(g[k][0]) for k in fixed},
                 grids={k:v.tolist() for k,v in g.items()},full=full.get(),pinned={k:v.get() for k,v in pinned.items()},require_peak=rule,
                 building=asdict(model),damper=asdict(dam),source=source_description,source_metadata=source_metadata,air_mode=optimization_air,
                 excitation_sha256=hashlib.sha256(times.tobytes()+wave.tobytes()).hexdigest(),
@@ -3914,7 +4014,7 @@ def lab(b,d,t,ag,title,out):
             def compute():
                 # 작업 스레드의 탐색 실행. stop과 progress는 중지 요청·진행 상황 전달에 사용한다.
                 rows=search_designs(model,dam,times,wave,g['beta'],g['angle'],g['B'],rule,g['r'],g['n'],memo,
-                    stop=run_state['cancel'],progress=run_state['progress'],tilts=g['tilt'],column_counts=g['columns'],air_mode=optimization_air,amplitudes=[float(source_metadata['amplitude_value'])] if amplitude_enabled else None,laboratory=source_metadata if amplitude_enabled else None)
+                    stop=run_state['cancel'],progress=run_state['progress'],tilts=g['tilt'],column_counts=g['columns'],pipe_losses=g['pipe_loss'] if context['pipe_loss_sweep'] or dam.pipe_loss_direct or float(g['pipe_loss'][0])!=dam.pipe_loss else None,air_mode=optimization_air,amplitudes=[float(source_metadata['amplitude_value'])] if amplitude_enabled else None,laboratory=source_metadata if amplitude_enabled else None)
                 context['stopped']=run_state['cancel'].is_set()
                 if not context['stopped']:
                     check_t,check_a,_=optimization_input(times,wave,source_metadata if amplitude_enabled else None,float(source_metadata['amplitude_value']) if amplitude_enabled else None)
@@ -3924,11 +4024,11 @@ def lab(b,d,t,ag,title,out):
                     for row in rows:row.update(check_status='중지로 미확인',check_rms_delta_pp=None,check_peak_delta_pp=None)
                 valid=[row for row in rows if row['eligible']]
                 if valid and not context['stopped']:
-                    best=valid[0];key=tuple(best[k] for k in ('beta','angle','B','r','n','amplitude_g','tilt','columns'))
+                    best=valid[0];key=tuple(best[k] for k in ('beta','angle','B','r','n','amplitude_g','tilt','columns','pipe_loss','pipe_loss_direct'))
                     if key not in traces:
                         mb,dd=search_trial(model,design_variant(dam,best['tilt'],best['columns']),best['B'],best['r'],best['n'])
                         tt,aa,_=optimization_input(times,wave,source_metadata if amplitude_enabled else None,best['amplitude_g'] if amplitude_enabled else None)
-                        traces[key]=simulate_space(mb,replace(dd,beta=best['beta'],angle=best['angle']),tt,aa,air_mode=optimization_air)
+                        traces[key]=simulate_space(mb,replace(dd,beta=best['beta'],angle=best['angle'],pipe_loss=best['pipe_loss'],pipe_loss_direct=best.get('pipe_loss_direct',dam.pipe_loss_direct)),tt,aa,air_mode=optimization_air)
                 return rows
             def display(rows):
                 if win.winfo_exists():
@@ -3955,6 +4055,7 @@ def lab(b,d,t,ag,title,out):
                 if key=='angle':lo=max(0,lo);hi=min(180,hi)
                 if key=='tilt':lo=max(.01,lo);hi=min(179.99,hi)
                 if key=='columns':lo=max(2,lo);hi=min(24,hi)
+                if key=='pipe_loss':lo=max(0.,lo)
                 for v,value in zip(values[key],(lo,hi,step)):v.set(f'{value:.10g}')
             start()
         def save_csv():
@@ -3990,6 +4091,94 @@ def lab(b,d,t,ag,title,out):
         for value in fixed.values():value.trace_add('write',fixed_changed)
         for value in (xvar,yvar,full,*pinned.values()):value.trace_add('write',counts)
         counts()
+    def sensitivity_window():
+        if playback['busy']:return
+        from threading import Event
+        from dataclasses import asdict
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg,NavigationToolbar2Tk
+        model=b;dam=current[0];times=t.copy();wave=ag.copy();metadata=dict(current[1].get('source',{}))
+        if dam.xi is not None:
+            messagebox.showinfo('관 손실 민감도','개구비 모드로 조건 적용한 뒤 실행하세요. 직접 총손실 ξ에 다른 손실을 중복 합산하지 않습니다.');return
+        win=tk.Toplevel(root);win.title('관 형상별 손실계수 민감도 · 가정 조건 비교');win.geometry('1180x830')
+        mode=tk.StringVar(value='A · 동일 손실계수 가정')
+        loss_text=tk.StringVar(value='1, 2, 3, 4')
+        controls=ttk.Frame(win);controls.pack(fill='x',padx=8,pady=6)
+        picker=ttk.Combobox(controls,textvariable=mode,values=['A · 동일 손실계수 가정','B · U형만 참고값 2.4'],state='readonly',width=28);picker.pack(side='left')
+        ttk.Label(controls,text='관 손실계수').pack(side='left',padx=6)
+        entry=ttk.Entry(controls,textvariable=loss_text,width=22);entry.pack(side='left')
+        note=tk.StringVar(value='계수 1~4는 가정값입니다. U형 2.4도 특정 선행 실험의 참고값이며 보편 상수가 아닙니다.')
+        ttk.Label(win,textvariable=note,wraplength=1130).pack(fill='x',padx=8)
+        tilt=dam.tilt if not math.isclose(dam.tilt,90.) else 60.
+        condition=(f'고정: 물 {dam.mass:.6g} kg · β {dam.beta:g} · B {dam.B:g} m · 조율비 {dam.frequency/tuning_frequency(model):.6g} (X 1차) · '
+            f'설치 {model.floor_data()[3]}층 · V형 {tilt:g}° / 다기둥·방사형 {max(3,dam.columns)}개 수직 기둥 · 관 방향 {dam.angle:g}°'
+            f'\n가진 {metadata.get("wave", "현재 기록")} / {metadata.get("harmonic_hz", "기록") } Hz · {float(np.max(abs(wave))/G):.5g} g · {times[-1]-times[0]:.5g}s · 수면 처리 stop'
+            '\n공통 원형 단면을 사용합니다(개별 비대칭 치수 제외). 물 질량과 조율비를 맞추므로 형상별 물높이·안지름은 달라집니다. 공통 계수를 각 바닥 가지에 적용하며 실제 분기 손실 분포는 미확인입니다.')
+        ttk.Label(win,text=condition,wraplength=1130).pack(fill='x',padx=8,pady=4)
+        fields=('shape_label','pipe_loss','xi_orifice','xi_total','rms_pct','peak_pct','peak_acceleration_reduction_pct','rms_acceleration_reduction_pct','peak_water_m','actual_r','status','failure_time_s','reason')
+        frame=ttk.Frame(win);frame.pack(fill='x',padx=8)
+        tree=ttk.Treeview(frame,columns=fields,show='headings',height=9)
+        titles=('형상','관 손실(가정)','오리피스 ξ','총손실 ξ','RMS 변위 저감 %','최대 변위 저감 %','최대 가속도 저감 %','RMS 가속도 저감 %','수면 변위 m','실제 조율비','상태','중단 s','원인')
+        for key,title in zip(fields,titles):tree.heading(key,text=title);tree.column(key,width=125 if key!='reason' else 330,stretch=False)
+        scrollbar=ttk.Scrollbar(frame,orient='horizontal',command=tree.xview);tree.configure(xscrollcommand=scrollbar.set)
+        tree.pack(fill='x');scrollbar.pack(fill='x')
+        fig=Figure(figsize=(10,4),constrained_layout=True);canvas=FigureCanvasTkAgg(fig,master=win)
+        NavigationToolbar2Tk(canvas,win).pack(fill='x');canvas.get_tk_widget().pack(fill='both',expand=True)
+        state={'rows':[],'context':None,'running':False,'progress':{}};cancel=Event()
+        def draw(rows):
+            state['rows']=rows;tree.delete(*tree.get_children());fig.clear();axes=fig.subplots(1,2)
+            for row in rows:
+                tree.insert('', 'end',values=[('—' if row.get(key) is None else f'{row[key]:.6g}' if isinstance(row.get(key),(float,np.floating)) else row.get(key,'')) for key in fields])
+            for ax,key,title in zip(axes,('rms_pct','rms_acceleration_reduction_pct'),('RMS 지붕 변위 저감률','RMS 절대가속도 저감률')):
+                for label in ('U형','V형','피자 거치대','다기둥형'):
+                    valid=sorted([row for row in rows if row['shape_label']==label],key=lambda row:row['pipe_loss'])
+                    if valid:ax.plot([r['pipe_loss'] for r in valid],[np.nan if r.get(key) is None else r[key] for r in valid],'o-',label=label)
+                ax.axhline(0,color='gray',lw=.6);ax.set(xlabel='가정 관 손실계수',ylabel='저감률 (%)',title=title);ax.grid(alpha=.2)
+                if ax.get_legend_handles_labels()[0]:ax.legend(fontsize=8)
+            import textwrap
+            caption=state['context']['comparison']+' · 계산 완료한 실제 점만 표시 / 중단 조건은 CSV 참조\n'+condition
+            fig.suptitle('\n'.join(textwrap.fill(line,width=100) for line in caption.splitlines()),fontsize=8)
+            canvas.draw_idle()
+        def finish():
+            state['running']=False
+            if win.winfo_exists():button.state(['!disabled']);entry.state(['!disabled']);picker.state(['!disabled']);stop_button.state(['disabled'])
+        def start():
+            if state['running'] or playback['busy']:return
+            try:
+                losses=[float(v.strip()) for v in loss_text.get().split(',') if v.strip()]
+                if not losses or not np.isfinite(losses).all() or min(losses)<0:raise ValueError('손실계수는 쉼표로 나눈 0 이상 숫자입니다.')
+            except ValueError as error:note.set(str(error));return
+            code='u_reference' if mode.get().startswith('B') else 'same'
+            state['context']=dict(building=asdict(model),damper=asdict(replace(dam,pipe_loss_direct=True)),source=condition,
+                source_metadata=metadata,air_mode='stop',require_peak=False,comparison=mode.get(),
+                planned_total=1+3*len(set(losses)) if code=='u_reference' else 4*len(set(losses)),
+                grids={'pipe_loss':sorted(set(losses+([2.4] if code=='u_reference' else [])))},duration_s=float(times[-1]-times[0]))
+            state['running']=True;state['rows']=[];state['progress']={'completed':0,'total':state['context']['planned_total']};cancel.clear();button.state(['disabled']);entry.state(['disabled']);picker.state(['disabled']);stop_button.state(['!disabled'])
+            def monitor():
+                if not win.winfo_exists() or not state['running']:return
+                info=state['progress'];note.set(f'완료 {info.get("completed",0)} / {info.get("total",0)} · '+('중지 요청' if cancel.is_set() else '가정 계수 민감도 분석 중'))
+                win.after(150,monitor)
+            def done(rows):
+                if not win.winfo_exists():return
+                state['context']['stopped']=cancel.is_set();draw(rows)
+                note.set(f'평가 {len(rows)}개 · 전체 완료 {sum(row["rms_pct"] is not None for row in rows)}개. 중단 설계는 전체 구간 저감률을 산출하지 않습니다. 평균으로 실제 최적 형상을 확정하지 않습니다.')
+            task(lambda:loss_sensitivity(model,dam,times,wave,losses,code,stop=cancel,progress=state['progress']),done,on_finish=finish);monitor()
+        def save_csv():
+            if not state['rows']:return
+            path=filedialog.asksaveasfilename(parent=win,defaultextension='.csv',filetypes=[('CSV','*.csv')])
+            if path:
+                try:export_optimizer_report(Path(path),state['rows'],state['context']);note.set('CSV·Excel 저장 완료')
+                except (OSError,ValueError) as error:note.set('저장 오류: '+str(error))
+        def save_png():
+            if not state['rows']:return
+            path=filedialog.asksaveasfilename(parent=win,defaultextension='.png',filetypes=[('PNG','*.png')])
+            if path:fig.savefig(path,dpi=300,bbox_inches='tight')
+        button=ttk.Button(controls,text='민감도 계산',command=start);button.pack(side='left',padx=6)
+        stop_button=ttk.Button(controls,text='중지',command=cancel.set,state='disabled');stop_button.pack(side='left')
+        ttk.Button(controls,text='CSV·Excel 저장',command=save_csv).pack(side='left',padx=5)
+        ttk.Button(controls,text='PNG 저장',command=save_png).pack(side='left')
+        win.bind('<Destroy>',lambda event:cancel.set() if event.widget is win else None,add='+')
+
     def compare():
         if paper_mode.get()=='논문 미확인':
             messagebox.showinfo('논문 조건 미확인','미확인 입력을 지정하고 사용자 실험으로 전환한 뒤 조건 적용을 먼저 누르세요.');return
@@ -4432,6 +4621,7 @@ def lab(b,d,t,ag,title,out):
         states.update({str(value):installed and key!='h' and not (key=='diameter' and target) for key,value in fields.items()})
         states[str(fields['beta'])]=installed and loss_mode_var.get()=='개구비'
         states[str(pipe_loss_var)]=installed and (loss_mode_var.get()=='개구비' or xi_scope_var.get()=='local')
+        states[str(pipe_direct_var)]=states[str(pipe_loss_var)]
         states[str(xi_scope_var)]=installed and loss_mode_var.get()=='직접 ξ'
         style=ttk.Style(root)
         for widget_type in ('TEntry','TSpinbox','TCombobox'):
@@ -4473,7 +4663,7 @@ def lab(b,d,t,ag,title,out):
         saved=dict(version=1,profiles={},last=None)
         messagebox.showwarning('설정 읽기',f'기존 설정을 읽지 못했습니다. 파일을 확인하세요.\n{error}')
     variable_groups={'pipe':fields,'floor':floor_fields,'source':quake_fields}
-    variables=dict(freeboard=freeboard_var,xi_scope=xi_scope_var,ramp_profile=ramp_profile_var,container_mass=container_mass_var,damping_mode=damping_mode_var,cx=c_vars['x'],cy=c_vars['y'],loss_mode=loss_mode_var,xi=xi_var,pipe_loss=pipe_loss_var,air_mode=air_mode_var,paper_mode=paper_mode,shape=shape_var,tilt=tilt_var,columns=column_var,count=count_var,mount=mount_var,
+    variables=dict(pipe_loss_direct=pipe_direct_var,freeboard=freeboard_var,xi_scope=xi_scope_var,ramp_profile=ramp_profile_var,container_mass=container_mass_var,damping_mode=damping_mode_var,cx=c_vars['x'],cy=c_vars['y'],loss_mode=loss_mode_var,xi=xi_var,pipe_loss=pipe_loss_var,air_mode=air_mode_var,paper_mode=paper_mode,shape=shape_var,tilt=tilt_var,columns=column_var,count=count_var,mount=mount_var,
         damping=damping_var,width=size_vars[0],depth=size_vars[1],size_link=size_link,
         stiffness_mode=stiffness_mode,water_mass=water_var,tube_length=tube_length_var,wave=kind_var,hz=hz_var,
         amplitude_mode=amplitude_mode,amplitude=amplitude_var,cycles=cycles_var,
@@ -4507,7 +4697,7 @@ def lab(b,d,t,ag,title,out):
             # 설정 JSON의 values는 일반 입력, groups는 관·층별·진원 입력 묶음이다.
             values=data['values'];groups=data['groups']
             freeboard_var.set('.12')  # 예전 프로필의 기존 여유 높이 보존
-            damping_mode_var.set('강성비례');loss_mode_var.set('개구비');xi_var.set('');xi_scope_var.set('total');pipe_loss_var.set('0');paper_mode.set('사용자 실험')
+            damping_mode_var.set('강성비례');loss_mode_var.set('개구비');xi_var.set('');xi_scope_var.set('total');pipe_loss_var.set('0');pipe_direct_var.set(False);paper_mode.set('사용자 실험')
             for flag,value,unit in ramps.values():flag.set(False)
             if 'csv_metadata' in data:
                 csv_metadata.clear();csv_metadata.update(data['csv_metadata'])
@@ -4588,7 +4778,7 @@ def lab(b,d,t,ag,title,out):
             wave='단방향',hz=f'{eb.frequency:.8g}',amplitude_mode='가속도 진폭 (g)',amplitude=str(STABLE_EXAMPLE_ACCEL_G),
             tune=False,ratio_enabled=False,pipe_on=True,tube_length='',cycles='39',container_mass=str(eb.container_mass),ramp_profile='quintic',
             start_ramp_on=True,start_ramp_value='3',start_ramp_unit='주기',end_ramp_on=True,end_ramp_value='3',end_ramp_unit='주기',
-            damping_mode=eb.damping_mode,loss_mode='개구비',xi_scope='total',xi='',pipe_loss=f'{ed.pipe_loss:g}',air_mode=AIR_MODE_LABELS['stop'],
+            damping_mode=eb.damping_mode,loss_mode='개구비',xi_scope='total',xi='',pipe_loss=f'{ed.pipe_loss:g}',pipe_loss_direct=ed.pipe_loss_direct,air_mode=AIR_MODE_LABELS['stop'],
             paper_mode='사용자 실험')
         data['groups']['pipe'].update(B=f'{ed.B*100:g}',h=str(ed.h*100),diameter=str(ed.diameter*100),angle='0',beta=f'{ed.beta:g}')
         data['groups']['floor']={'m':','.join(map(str,eb.masses)),'k':','.join(map(str,eb.stories)),'y':','.join(map(str,eb.stories_y)),'h':','.join(map(str,eb.heights))}
@@ -4620,7 +4810,7 @@ def lab(b,d,t,ag,title,out):
     settings_menu.add_command(label='저장한 설정 불러오기',command=load_named)
     menu.add_cascade(label='설정',menu=settings_menu)
     analysis_menu=tk.Menu(menu,tearoff=False)
-    for label,command in [('최적 설계 탐색',optimize),('실험 그래프 비교',history_window),
+    for label,command in [('최적 설계 탐색',optimize),('관 형상별 손실 민감도',sensitivity_window),('실험 그래프 비교',history_window),
             ('각도별 그래프 비교',angle_window),('형상 × 각도 비교',compare),
             ('주 실험실 주파수 응답',frequency_window),('층별 가속도 표',acceleration_window),('공정 비교 (모양별)',fair_window)]:
         analysis_menu.add_command(label=label,command=command)
