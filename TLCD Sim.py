@@ -18,6 +18,8 @@ Hz는 초당 진동 횟수이며 각진동수는 omega=2*pi*f이다.
 세계 X·Y 방향의 층별 강성은 독립 입력. 가진 방향 좌표로 회전하여 적분한다.
 기본 U형 B는 양 수직관 중심선 사이 거리, h는 수평관 중심선부터 정지 수면까지 높이.
 L=B+2h는 중심선 기반의 이상화된 물기둥 길이. 둥근 곡관의 실제 체적 보정은 미포함.
+leg_length는 기둥의 관 축을 따라 관 끝까지 잰 길이. V형의 수직 높이는 leg_length*sin(tilt).
+관 길이는 물 질량과 독립이며 관 끝·넘침 한계에 반영한다. 빈 관 자체 질량은 자동 추정하지 않는다.
 
 [입력 우선순위 / 별도 계산]
 주 실험실은 화면의 층별 값과 물 질량·안지름을 사용한다. h는 이 값에서 자동 계산한다.
@@ -147,6 +149,7 @@ class Damper:
     diameter: float = 0.05   # 원형 관의 안지름 [m], 모든 구간 일정
     angle: float = 0.0       # 지진 방향과 관의 수평축 사이 각도 [도]
     beta: float = .4         # 오리피스 면적 / 유로 단면적
+    leg_length: float | None = None  # 각 기둥의 관 축 길이[m]. None은 기존 h+여유높이 방식.
     freeboard: float = 0.12  # 정지 수면 위 여유 높이 [m]
 
     shape: str = 'U형'
@@ -194,7 +197,7 @@ class Damper:
     @property
     def limit(self):
         # 수면이 바닥에 닿거나 관 밖으로 넘치면 현재 모델을 적용할 수 없다.
-        return min(self.h, self.freeboard)
+        return min(self.h,self.freeboard if self.leg_length is None else self.leg_length-self.h)
 
 
 def equivalent_u(d):
@@ -230,7 +233,7 @@ def validate(b, d):
     if b.stories_y and (len(b.stories_y)!=len(b.floor_data()[0]) or any(not np.isfinite(x) or x<=0 for x in b.stories_y)):
         raise ValueError('Y방향 강성은 층마다 양수를 하나씩 입력하세요.')
 
-    if not all(np.isfinite([b.mass,b.frequency,b.damping,b.container_mass])) or not all(np.isfinite([v for k,v in asdict(d).items() if k not in ("shape","bores","tops")])):
+    if not all(np.isfinite([b.mass,b.frequency,b.damping,b.container_mass])) or not all(np.isfinite([v for k,v in asdict(d).items() if k not in ("shape","bores","tops","leg_length")])):
         raise ValueError('모든 매개변수는 유한한 수여야 합니다.')
     if not all(np.isfinite(x) and x>0 for x in (b.width,b.depth)):
         raise ValueError('건물 가로와 세로는 양수여야 합니다.')
@@ -238,6 +241,11 @@ def validate(b, d):
         raise ValueError('다기둥형 기둥 수는 2~24 사이 정수로 입력하세요.')
     if d.separate_u and min(d.B,d.h,d.diameter)>0:
         u_dimensions(d)
+    if d.leg_length is not None:
+        if not np.isfinite(d.leg_length) or d.leg_length<=0:raise ValueError('기둥 관 길이는 유한한 양수여야 합니다.')
+        if not d.separate_u:
+            count={'피자 거치대':3,'다기둥형':d.columns}.get(d.shape,2)
+            if d.leg_length<=2*d.h/count:raise ValueError('관 끝이 정지 수면보다 낮습니다. 관 길이를 늘리거나 물 질량을 줄이세요.')
     if d.shape not in SHAPES or not 0<d.tilt<=90: raise ValueError('관 종류와 V형 각도(0도 초과~90도)를 확인하세요.')
     if min(b.mass, b.frequency, d.B, d.h, d.diameter, d.freeboard) <= 0:
         raise ValueError('질량, 진동수, 길이와 지름은 양수여야 합니다.')
@@ -324,14 +332,23 @@ def recorded_input():
 
 # Hz와 선택한 진폭(g 또는 cm) → 같은 사인 지반운동의 가속도/변위.
 # 변위 진폭을 고정하고 Hz를 높이면 가속도 진폭은 omega²에 비례해 커진다.
-def laboratory_input(hz, amplitude, mode='가속도 진폭 (g)'):
-    """변위 x=A sin(ωt)에 대응하는 가속도 -ω²A sin(ωt)를 만든다."""
+def laboratory_input(hz, amplitude, mode='가속도 진폭 (g)', cycles=None):
+    """변위 x=A sin(ωt)에 대응하는 가속도 -ω²A sin(ωt)를 만든다.
+    cycles를 주면 실험 시간 = 가진 횟수 / 진동수, 없으면 기존처럼 30초."""
     if not math.isfinite(hz) or hz <= 0:
         raise ValueError('진동수는 유한한 양수 Hz로 입력하세요.')
     if not math.isfinite(amplitude) or amplitude < 0:
         raise ValueError('진폭은 유한한 0 이상 값으로 입력하세요.')
     if hz >= 25:
         raise ValueError('현재 시간 간격에서 진동수는 25 Hz 미만이어야 합니다.')
+    if cycles is None:
+        duration = 30.
+    else:
+        if not math.isfinite(cycles) or cycles != int(cycles) or not 1 <= cycles <= 1000:
+            raise ValueError('가진 횟수는 1~1000 사이의 정수로 입력하세요.')
+        duration = cycles/hz
+        if duration > 600:
+            raise ValueError(f'실험 시간이 {duration:.0f}초로 너무 깁니다. 600초 이하가 되도록 가진 횟수를 줄이세요.')
     omega = 2*np.pi*hz
     if mode == '가속도 진폭 (g)':
         accel = amplitude*G
@@ -345,11 +362,11 @@ def laboratory_input(hz, amplitude, mode='가속도 진폭 (g)'):
         raise ValueError('진동수 또는 진폭이 너무 큽니다.')
     # 조화 입력의 선형 보간 오차를 줄이도록 한 주기당 최소 100개 표본을 둔다.
     dt=min(.02,1/(100*hz))
-    t=np.linspace(0.,30.,int(math.ceil(30/dt))+1)
+    t=np.linspace(0.,duration,int(math.ceil(duration/dt))+1)
     signal = -accel*np.sin(omega*t)
     meta = dict(wave='단방향', harmonic_hz=hz, amplitude_mode=mode,
         amplitude_value=amplitude, displacement_amplitude_m=displacement,
-        site_pga_g=accel/G, bearing_deg=0.,
+        site_pga_g=accel/G, bearing_deg=0., cycles=cycles if cycles is not None else duration*hz, duration_s=duration,
         initial_ground_velocity_m_s=omega*displacement,
         phase='x=A sin(2πft), a=-(2πf)² A sin(2πft)')
     return t, signal, meta
@@ -487,7 +504,7 @@ def setup_plot():
 
 def draw_geometry(ax, d):
     ax.clear()
-    top = d.h + d.freeboard
+    top = d.leg_length if d.leg_length is not None else d.h + d.freeboard
     ax.plot([-d.B/2, -d.B/2, d.B/2, d.B/2], [top, 0, 0, top],
             lw=12, color='#cbd5e1', solid_capstyle='butt')
     ax.plot([-d.B/2, -d.B/2, d.B/2, d.B/2], [d.h, 0, 0, d.h],
@@ -517,7 +534,7 @@ def draw_result(fig, axes, b, d, r, title):
             geometry.plot(*np.stack((start,end)).T,color='#258aae',lw=5)
         for i,(start,direction) in enumerate(zip(feet,up)):
             wet=np.broadcast_to(leg,len(feet))[i]
-            top=start+direction*(u_dimensions(d)[4][i] if d.separate_u else wet+d.freeboard/direction[2])
+            top=start+direction*(u_dimensions(d)[4][i] if d.separate_u else d.leg_length if d.leg_length is not None else wet+d.freeboard/direction[2])
             geometry.plot(*np.stack((start,top)).T,color='#9bb2bf',lw=5)
             geometry.plot(*np.stack((start,start+direction*wet)).T,color='#258aae',lw=3)
             geometry.text(*top,str(i+1))
@@ -674,7 +691,7 @@ def search_trial(b,d,B,ratio,floor):
         # 모든 단면을 같은 비율로 확대하면 고유진동수는 유지되고 물 질량만 비례한다.
         target=ratio*tuning_frequency(b)
         def frequency(height):
-            trial=replace(d,B=float(B),h=height,tops=())
+            trial=replace(d,B=float(B),h=height,tops=(),leg_length=None)
             return trial.frequency
         lo=1e-10;hi=max(d.h,.1)
         if frequency(lo)<target:
@@ -813,7 +830,8 @@ def u_dimensions(d):
     # 각 독립 U관에 수직부 물 부피를 균등 배분. 연결된 좌우 수면은 정지 시 같은 높이.
     rest=np.repeat(2*d.h*d.area/len(spans)/areas.reshape(-1,2).sum(axis=1),2)
     if d.tops and len(d.tops)!=count:raise ValueError('기둥 높이 개수를 확인하세요.')
-    tops=np.array([rest[i]+d.freeboard if x is None else x for i,x in enumerate(d.tops)]) if d.tops else rest+d.freeboard
+    default_tops=np.full(count,d.leg_length) if d.leg_length is not None else rest+d.freeboard
+    tops=np.array([default_tops[i] if x is None else x for i,x in enumerate(d.tops)]) if d.tops else default_tops
     if len(tops)!=count or not np.isfinite(tops).all() or np.any(tops<=rest):
         raise ValueError('각 기둥 끝은 정지 수면보다 높아야 합니다. 높이를 늘리거나 물을 줄이세요.')
     return spans,bores,areas,rest,tops
@@ -940,7 +958,7 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None):
     weights=np.full(len(starts),.5*1000*d.area*d.loss)
     flow_eye=np.eye(len(starts))
     # 정지 수면에서 관 끝까지의 상승 여유. 비대칭 관은 기둥마다 값이 다를 수 있다.
-    clearance=u_dimensions(d)[4]-leg if d.separate_u else d.freeboard/up[0,2]
+    clearance=u_dimensions(d)[4]-leg if d.separate_u else d.leg_length-leg if d.leg_length is not None else d.freeboard/up[0,2]
     # 일반 원형 U관의 보수적인 전단면 충수 적용 경계.
     # 수평 관 중심선 z=0, 내측 천장 z=D/2. 접합부/자유수면의 3차원 형상은 미해석.
     # 이는 공기 유입을 확정하는 실험식이 아니라 고전 물기둥 모델의 적용 제한이다.
@@ -1173,6 +1191,14 @@ class Source:
             bearing_deg=bearing,heading_deg=heading,site_pga_g=pga)
 
 
+def stable_example():
+    """실행·조작 확인용 선형 예제. 실제 건물의 안전성 보증용 설계가 아니다."""
+    building=Building(mass=20.,damping=.05,masses=(10.,10.),stories=(1800.,1800.),
+        stories_y=(1800.,1800.),heights=(.3,.3),mount=2)
+    building=replace(building,frequency=tuning_frequency(building))
+    return building,Damper(B=.2,h=.2,diameter=.025,freeboard=.12,beta=.4)
+
+
 def read_settings(path):
     """설정 데이터는 실행 파일과 별도로 보존한다."""
     if not path.exists():return dict(version=1,profiles={},last=None)
@@ -1329,6 +1355,20 @@ def lab(b,d,t,ag,title,out):
     ttk.Combobox(quake_page,textvariable=amplitude_mode,
         values=['가속도 진폭 (g)','변위 진폭 (cm)'],state='readonly',width=22).pack(fill='x')
     ttk.Entry(quake_page,textvariable=amplitude_var,width=10).pack(anchor='w')
+    cycles_var=tk.StringVar(value='30')
+    cycles_row=ttk.Frame(quake_page);cycles_row.pack(fill='x',pady=2)
+    ttk.Label(cycles_row,text='가진 횟수 (회, 빈칸=기존 30초)').pack(side='left')
+    ttk.Entry(cycles_row,textvariable=cycles_var,width=8).pack(side='right')
+    duration_note=tk.StringVar()
+    ttk.Label(quake_page,textvariable=duration_note,foreground='#30566a').pack(anchor='w')
+    def update_duration_note(*_):
+        try:
+            frequency=float(hz_var.get())
+            duration=float(cycles_var.get())/frequency if cycles_var.get().strip() else 30.
+            duration_note.set(f'실험 시간 {duration:.5g}초' if frequency>0 and duration>0 else '양수를 입력하세요.')
+        except (ValueError,ZeroDivisionError):duration_note.set('진동수와 횟수를 확인하세요.')
+    hz_var.trace_add('write',update_duration_note);cycles_var.trace_add('write',update_duration_note)
+    update_duration_note()
     ttk.Label(quake_page,text='진폭은 중심에서 최대값 · 기본 0.01 g는 실행용 가정값\n변위 x=A sin(2πft), 가속도 a=−(2πf)² A sin(2πft)',wraplength=245).pack(anchor='w')
     original_wave=ag
     reference_peak=float(np.max(np.abs(ag))/G)
@@ -1381,6 +1421,10 @@ def lab(b,d,t,ag,title,out):
     ttk.Label(pipe_page,text='총 물 질량 (kg)').pack(anchor='w')
     ttk.Entry(pipe_page,textvariable=water_var,width=10).pack(anchor='w')
     ttk.Label(pipe_page,text='오리피스 손실만 근사 · 분기관 경험식 적용 불확실',wraplength=250).pack(anchor='w')
+    tube_length_var=tk.StringVar(value='' if d.leg_length is None else f'{100*d.leg_length:g}')
+    ttk.Label(pipe_page,text='각 기둥 관 길이 (cm, 관 축 기준)').pack(anchor='w')
+    ttk.Entry(pipe_page,textvariable=tube_length_var,width=10).pack(anchor='w')
+    ttk.Label(pipe_page,text='빈칸은 기존 자동 길이 · 물높이와 별개\nV형 수직 높이 = 관 길이 × sin(경사각)\n개별 U관 높이가 우선 · 빈 관 질량은 자동 변경 안 됨',wraplength=280).pack(anchor='w')
     def preview_frequency(*_):
         # 실제 적용과 동일한 입력 경로를 사용한다. h 입력란은 계산 결과 표시용이다.
         if tune_mode.get():return
@@ -1524,7 +1568,7 @@ def lab(b,d,t,ag,title,out):
             tubes=[]
             segments=[(a,b-a,None) for a,b in zip(starts,ends)]
             rest=np.broadcast_to(leg,len(feet))
-            tops=u_dimensions(dam)[4] if dam.separate_u else rest+dam.freeboard/up[:,2]
+            tops=u_dimensions(dam)[4] if dam.separate_u else np.full(len(feet),dam.leg_length) if dam.leg_length is not None else rest+dam.freeboard/up[:,2]
             bores=u_dimensions(dam)[1] if dam.separate_u else np.full(len(feet),dam.diameter)
             segments.extend((a,u*tops[i],i) for i,(a,u) in enumerate(zip(feet,up)))
             direction=np.array([np.sin(yaw)*np.cos(pitch),np.cos(yaw)*np.cos(pitch),np.sin(pitch)])
@@ -1583,7 +1627,7 @@ def lab(b,d,t,ag,title,out):
         first_y=fx*math.sin(bearing)+fy*math.cos(bearing)
         # 바닥부터 관 끝까지의 범위와 이번 실험의 전체 이동량으로 한 번의 배율을 정한다.
         half=max(.54,np.hypot(bx,by)+.06,dam.B*.5+dam.diameter)+r['travel']
-        top=H+dam.h+dam.freeboard+dam.diameter
+        top=H+(dam.leg_length if dam.leg_length is not None else dam.h+dam.freeboard)+dam.diameter
         if dam.separate_u:
             feet=network(dam)[0]
             top=H+max(feet[:,2]+u_dimensions(dam)[4])+dam.diameter
@@ -1635,6 +1679,8 @@ def lab(b,d,t,ag,title,out):
         if r.get('installed',True) and (dam.shape!='U형' or dam.separate_u):
             draw_network(dam,r,j,P,origin+np.array([dx,dy,0])@P,attach_z,meta['heading_deg'],yaw,pitch)
         elif r.get('installed',True):
+            tube_top=dam.leg_length if dam.leg_length is not None else dam.h+dam.freeboard
+            air_height=tube_top-dam.h
             angle=math.radians(meta['heading_deg'] if 'levels' in r else meta['bearing_deg']+dam.angle)
             key=(dam,round(angle,9),width,height,yaw,pitch,scale)
             if key not in mesh_cache:
@@ -1642,12 +1688,12 @@ def lab(b,d,t,ag,title,out):
                 radius=dam.diameter/2
                 bend=min(dam.B*.22,dam.h*.45,radius*1.8)
                 # (관 축을 따른 수평 위치, 높이, 단면의 평면 내 법선)
-                rings=[(-dam.B/2,dam.h+dam.freeboard,1.,0.)]
+                rings=[(-dam.B/2,tube_top,1.,0.)]
                 for alpha in np.linspace(0,math.pi/2,5):
                     rings.append((-dam.B/2+bend*(1-math.cos(alpha)),bend*(1-math.sin(alpha)),math.cos(alpha),math.sin(alpha)))
                 for alpha in np.linspace(0,math.pi/2,5):
                     rings.append((dam.B/2-bend+bend*math.sin(alpha),bend*(1-math.cos(alpha)),-math.sin(alpha),math.cos(alpha)))
-                rings.append((dam.B/2,dam.h+dam.freeboard,-1.,0.))
+                rings.append((dam.B/2,tube_top,-1.,0.))
                 ca,sa=math.cos(angle),math.sin(angle)
                 theta=np.arange(16)*2*math.pi/16
                 def make_mesh(rad):
@@ -1674,8 +1720,8 @@ def lab(b,d,t,ag,title,out):
             water,shell,ix,kx,colors=mesh_cache[key]
             shift=origin+np.array([dx,dy,0])@P
             water=water+shift
-            water[0]+=( -dam.freeboard-level)*P[2]
-            water[-1]+=(-dam.freeboard+level)*P[2]
+            water[0]+=(-air_height-level)*P[2]
+            water[-1]+=(-air_height+level)*P[2]
             for n,coords in enumerate(water[ix,kx].reshape(-1,8).tolist()):
                 paint(('tube','water',n),'polygon',coords,fill=colors[n],outline='')
             shell=shell+shift
@@ -1885,6 +1931,7 @@ def lab(b,d,t,ag,title,out):
                 status.set('조건을 확인해 주세요.'); messagebox.showerror('실험실',str(error))
             finally:
                 if on_finish is not None:on_finish()
+                if root.winfo_exists():update_context_controls()
         root.after(40,poll)
     def calculate(keep_time=False):
         nonlocal ag
@@ -1941,7 +1988,7 @@ def lab(b,d,t,ag,title,out):
             if vals['h']<=0:raise ValueError('물이 바닥 관을 채우기에 부족합니다. B를 줄이거나 물 질량을 늘리세요.')
             # 「U관 기둥별 안지름·높이」의 사용자 설정을 선택 형상의 관 정보에 합친다.
             bores,tops=leg_specs.get(shape_var.get(),((),()))
-            vals.update(shape=shape_var.get(),tilt=float(tilt_var.get()),columns=int(column_var.get()),bores=bores,tops=tops)
+            vals.update(leg_length=float(tube_length_var.get())/100 if tube_length_var.get().strip() else None,shape=shape_var.get(),tilt=float(tilt_var.get()),columns=int(column_var.get()),bores=bores,tops=tops)
             if ratio_enabled.get():
                 ratio=float(tune_ratio.get())
                 if not np.isfinite(ratio) or ratio<=0:raise ValueError('조율비는 양수여야 합니다.')
@@ -1952,7 +1999,7 @@ def lab(b,d,t,ag,title,out):
                 if not math.isfinite(wl) or wl<=0: raise ValueError('TLCD 각진동수는 양수여야 합니다.')
                 lo,hi=1e-7,max(1.,vals['h'])
                 def rate(height):
-                    trial=replace(d,**dict(vals,h=height,tops=()))
+                    trial=replace(d,**dict(vals,h=height,tops=(),leg_length=None))
                     validate(target_b,trial)
                     return 2*np.pi*trial.frequency
                 if rate(lo)<=wl: raise ValueError('이 관 길이에서 가능한 각진동수보다 큽니다.')
@@ -1976,7 +2023,7 @@ def lab(b,d,t,ag,title,out):
             # 단방향은 실험실 Hz/진폭만 사용. 지진 기록 모드에서만 진원·거리·세기 입력을 사용한다.
             if kind=='단방향':
                 timeline,signal,meta=laboratory_input(float(hz_var.get()),
-                    float(amplitude_var.get()),amplitude_mode.get())
+                    float(amplitude_var.get()),amplitude_mode.get(),float(cycles_var.get()) if cycles_var.get().strip() else None)
                 quake=None
                 relative=raw.angle%180
             else:
@@ -1993,7 +2040,7 @@ def lab(b,d,t,ag,title,out):
             dam=replace(raw,angle=relative,reverse=(raw.angle-meta['bearing_deg'])%360>=180)
             # 캐시 키에는 실제 계산을 바꾸는 모든 설정과 가진 진폭·주파수를 포함한다.
             key=(quake,raw,target_b,enabled,kind,meta.get('harmonic_hz'),
-                meta.get('amplitude_mode'),meta.get('amplitude_value'))
+                meta.get('amplitude_mode'),meta.get('amplitude_value'),meta.get('cycles'))
         except ValueError as error:
             pipe_on.set(current[1].get('installed',True))
             messagebox.showerror('입력 확인',str(error)); return
@@ -2019,7 +2066,7 @@ def lab(b,d,t,ag,title,out):
             # 결과에는 계산에 사용한 건물의 스냅샷을 붙인다. 뒤에 입력을 바꿔도 이전 실험은 유지된다.
             r['building_spec']=target_b
             cache[key]=r; r['source']=meta; current[:]=[dam,r]
-            location=(f"실험실 {meta['harmonic_hz']:g} Hz · 변위 진폭 {meta['displacement_amplitude_m']*100:g} cm" if kind=='단방향'
+            location=(f"실험실 {meta['harmonic_hz']:g} Hz · {meta.get('cycles',0):g}회 ({meta.get('duration_s',0):.4g}초) · 변위 진폭 {meta['displacement_amplitude_m']*100:g} cm" if kind=='단방향'
                 else f"진원 거리 {meta['distance_km']:.1f} km")
             source.set(f"{kind}  ·  {count}층 / 관 {mount}층   ·   {location}   ·   건물 입력 {meta['site_pga_g']:.4f} g   ·   관과 진동 방향 {relative:.1f}°")
             model_info=building_summary(b,r)
@@ -2642,6 +2689,55 @@ def lab(b,d,t,ag,title,out):
     chooser.bind('<<ComboboxSelected>>',draw_chart)
     floor_selector.bind('<<ComboboxSelected>>',draw_chart)
     pause();refresh();status.set('기본 실험 준비 완료 · ▶ 재생')
+    inactive_note=tk.StringVar()
+    ttk.Label(settings.master,textvariable=inactive_note,wraplength=380,foreground='#68747e').pack(anchor='w',after=settings)
+    def update_context_controls(*_):
+        # 입력값은 보존하며 현재 선택에서 사용하지 않는 위젯만 회색 비활성화한다.
+        # 계산 중 탐색 창이 잠근 위젯을 여기서 다시 활성화하지 않는다.
+        if playback['busy']:return
+        installed=pipe_on.get();shape=shape_var.get();laboratory=kind_var.get()=='단방향'
+        target=tune_mode.get()
+        states={str(tilt_var):installed and shape=='V형',
+            str(column_var):installed and shape=='다기둥형',
+            str(cycles_var):laboratory,str(hz_var):laboratory,str(amplitude_var):laboratory,str(amplitude_mode):laboratory,
+            str(mount_var):installed,str(tune_mode):installed,
+            str(shape_var):installed,str(water_var):installed,str(tube_length_var):installed,
+            str(omega_b):stiffness_mode.get()=='목표 X 1차 진동수',
+            str(omega_l):installed and target,
+            str(floor_fields['m']):not size_link.get()}
+        states.update({str(value):not laboratory for value in quake_fields.values()})
+        states.update({str(value):installed and key!='h' and not (key=='diameter' and target) for key,value in fields.items()})
+        style=ttk.Style(root)
+        for widget_type in ('TEntry','TSpinbox','TCombobox'):
+            style.map('Context.'+widget_type,
+                fieldbackground=[('disabled','#e5e7eb'),('readonly','#e5e7eb')],
+                foreground=[('disabled','#777777'),('readonly','#777777')])
+        def visit(parent):
+            for widget in parent.winfo_children():
+                if isinstance(widget,(ttk.Entry,ttk.Combobox,ttk.Spinbox)):
+                    variable=str(widget.cget('textvariable'))
+                elif isinstance(widget,ttk.Checkbutton):variable=str(widget.cget('variable'))
+                else:variable=None
+                if variable in states:
+                    widget.state(['!disabled'] if states[variable] else ['disabled'])
+                    if isinstance(widget,ttk.Combobox):widget.configure(style='Context.TCombobox')
+                    elif isinstance(widget,ttk.Spinbox):widget.configure(style='Context.TSpinbox')
+                    elif isinstance(widget,ttk.Entry):widget.configure(style='Context.TEntry')
+                if isinstance(widget,ttk.Button) and widget.cget('text')=='U관 기둥별 안지름 · 높이':
+                    widget.state(['!disabled'] if installed and shape in ('U형','독립 U관 3개') else ['disabled'])
+                visit(widget)
+        visit(settings)
+        notes=['회색 = 현재 미사용/자동 계산. h는 물 질량·B·안지름으로 계산합니다.']
+        if laboratory:notes.append('단방향에서는 진원·10 km 세기가 미사용입니다.')
+        else:notes.append('지진 기록에서는 실험실 Hz·진폭이 미사용입니다.')
+        if size_link.get():notes.append('층별 질량은 기준 면적비로 계산됩니다.')
+        if target and installed:notes.append('목표 TLCD ω에 맞춰 h와 안지름을 계산합니다.')
+        if not installed:notes.append('관 없음 · 관 설정과 설치 층은 미사용입니다.')
+        inactive_note.set(' '.join(notes))
+    for selection in (shape_var,kind_var,pipe_on,tune_mode,stiffness_mode,size_link):
+        selection.trace_add('write',update_context_controls)
+    update_context_controls()
+
     # 입력 문자열과 보조 설정까지 저장하여 다시 열었을 때 같은 조건을 복원한다.
     script=globals().get('__file__')
     settings_path=(Path(script).resolve().parent if script else Path.cwd())/'TLCD_settings.json'
@@ -2653,8 +2749,8 @@ def lab(b,d,t,ag,title,out):
     variable_groups={'pipe':fields,'floor':floor_fields,'source':quake_fields}
     variables=dict(shape=shape_var,tilt=tilt_var,columns=column_var,count=count_var,mount=mount_var,
         damping=damping_var,width=size_vars[0],depth=size_vars[1],size_link=size_link,
-        stiffness_mode=stiffness_mode,water_mass=water_var,wave=kind_var,hz=hz_var,
-        amplitude_mode=amplitude_mode,amplitude=amplitude_var,
+        stiffness_mode=stiffness_mode,water_mass=water_var,tube_length=tube_length_var,wave=kind_var,hz=hz_var,
+        amplitude_mode=amplitude_mode,amplitude=amplitude_var,cycles=cycles_var,
         omega_b=omega_b,omega_l=omega_l,tune=tune_mode,ratio=tune_ratio,
         ratio_enabled=ratio_enabled,pipe_on=pipe_on)
     def snapshot():
@@ -2688,6 +2784,7 @@ def lab(b,d,t,ag,title,out):
                 kind_box.configure(values=list(presets))
             # 진폭 항목이 없는 예전 설정에도 실행용 기본값을 적용한다.
             amplitude_mode.set('가속도 진폭 (g)');amplitude_var.set('0.01')
+            tube_length_var.set('');cycles_var.set('')
             # 알고 있는 키만 위젯 변수에 복원한다. 오래된 설정에 없는 입력은 현재 기본값을 유지한다.
             for key,value in values.items():
                 if key in variables:variables[key].set(value)
@@ -2730,6 +2827,19 @@ def lab(b,d,t,ag,title,out):
         ttk.Button(window,text='불러오기',command=load).pack(pady=8)
         ttk.Label(window,text='불러온 설정은 자동으로 조건 적용됩니다.').pack(padx=12,pady=8)
     menu=tk.Menu(root);settings_menu=tk.Menu(menu,tearoff=False)
+    def load_stable_example():
+        eb,ed=stable_example()
+        data=snapshot()
+        data['values'].update(shape='U형',tilt='60',columns='4',count='2',mount='2',damping=str(eb.damping),
+            width='56',depth='44',size_link=False,stiffness_mode='직접 입력',water_mass=str(ed.mass),
+            wave='단방향',hz='1.3',amplitude_mode='가속도 진폭 (g)',amplitude='0.01',
+            tune=False,ratio_enabled=False,pipe_on=True,tube_length='',cycles='39')
+        data['groups']['pipe'].update(B=str(ed.B*100),h=str(ed.h*100),diameter=str(ed.diameter*100),angle='0',beta=str(ed.beta))
+        data['groups']['floor']={'m':'10,10','k':'1800,1800','y':'1800,1800','h':'.3,.3'}
+        data['legs']={'U형':[[],[]]}
+        data['reference_size']=[eb.width,eb.depth,list(eb.masses)]
+        restore(data)
+    settings_menu.add_command(label='기본 안정 예제 불러오기',command=load_stable_example)
     settings_menu.add_command(label='이름 붙여 설정 저장',command=save_named)
     settings_menu.add_command(label='저장한 설정 불러오기',command=load_named)
     menu.add_cascade(label='설정',menu=settings_menu);root.configure(menu=menu)
@@ -3320,7 +3430,9 @@ def main():
     import matplotlib
     matplotlib.use('Agg')
     cfg=json.loads(args.config.read_text(encoding='utf-8-sig')) if args.config else {}
-    b,d=Building(**cfg.get('building',{})),Damper(**cfg.get('damper',{}))
+    example_b,example_d=stable_example()
+    b=Building(**cfg['building']) if 'building' in cfg else example_b
+    d=Damper(**cfg['damper']) if 'damper' in cfg else example_d
     validate(b,d)
     if args.input and not args.unit: parser.error('CSV에는 --unit 단위가 필요합니다.')
     t,ag=load_input(args.input,args.unit) if args.input else recorded_input()
