@@ -212,7 +212,7 @@ class Building:
 @dataclass(frozen=True)
 class Damper:
     B: float = 0.30          # 바닥 수평 관의 중심선 길이 [m]
-    h: float = 0.10          # 바닥 중심선부터 정지 수면까지 높이 [m]
+    h: float = 0.10          # 물량 파라미터[m]. 수직부 물 부피=2*A*h. 실제 수면은 형상별 계산.
     diameter: float = 0.05   # 원형 관의 안지름 [m], 모든 구간 일정
     angle: float = 0.0       # 지진 방향과 관의 수평축 사이 각도 [도]
     # 논문 TLCBD의 c_L=2*m_l*xi_l*omega_d는 선형 감쇠 정의이므로 이 xi로 자동 변환하지 않는다.
@@ -282,8 +282,9 @@ class Damper:
 
     @property
     def limit(self):
-        # 수면이 바닥에 닿거나 관 밖으로 넘치면 현재 모델을 적용할 수 없다.
-        return min(self.h,self.freeboard if self.leg_length is None else self.leg_length-self.h)
+        # 기존 API의 스칼라 값은 모든 기둥에서 허용되는 최소 대칭 변위 여유이다.
+        rest,lower,upper=column_water_heights(self)
+        return max(0.,float(min(np.min(rest-lower),np.min(upper-rest))))
 
 
 def is_tilted(d):
@@ -380,6 +381,64 @@ def orifice_loss(beta):
     psi=1-beta
     return (psi+.707*psi**.375)**2/beta**2
 
+def column_water_heights(d):
+    """수평관 중심선 기준 기둥별 정지 수면·중단 하한·관 끝 높이[m]."""
+    feet,up,leg,*_=network(d)
+    legs=np.broadcast_to(np.asarray(leg,float),len(up))
+    rest=legs*up[:,2]
+    if d.separate_u:
+        tops=np.asarray(u_dimensions(d)[4],float)*up[:,2]
+    elif d.leg_length is not None:
+        tops=d.leg_length*up[:,2]
+    else:
+        tops=rest+d.freeboard
+    return rest,np.full(len(up),d.diameter/2),tops
+
+
+def column_surface_text(d,b):
+    rest,lower,upper=column_water_heights(d)
+    low,high=1000*np.min(rest),1000*np.max(rest)
+    height=f'{low:.3g}' if np.isclose(low,high) else f'{low:.3g}~{high:.3g}'
+    return (f'현재 조율비 r={d.frequency/tuning_frequency(b):.5g} (X 1차)'
+        f'\n실제 정지 수면 {height} mm · 수평관 중심선 기준'
+        f'\n최소 하향 여유 {1000*np.min(rest-lower):.3g} mm')
+
+
+@lru_cache(maxsize=512)
+def validate_column_spacing(d):
+    """수직·경사 기둥 축 선분 사이 거리를 안지름 합으로 검사한다.
+    관벽 두께를 입력받지 않으므로 안지름 기준의 최소 간섭 검사다.
+    의도된 바닥 유로 접합부는 검사 대상인 기둥 축에 포함하지 않는다.
+    """
+    feet,up,leg,*_=network(d)
+    legs=np.broadcast_to(np.asarray(leg,float),len(up))
+    if d.separate_u:
+        _,bores,_,_,tops=u_dimensions(d)
+    else:
+        bores=np.full(len(up),d.diameter)
+        tops=np.full(len(up),d.leg_length) if d.leg_length is not None else legs+d.freeboard/up[:,2]
+    axes=up*np.asarray(tops)[:,None]
+    def point_distance(point,start,vector):
+        fraction=np.clip(np.dot(point-start,vector)/np.dot(vector,vector),0.,1.)
+        return float(np.linalg.norm(point-start-fraction*vector))
+    for i in range(len(feet)):
+        for j in range(i+1,len(feet)):
+            a,u=feet[i],axes[i];b,v=feet[j],axes[j]
+            distance=min(point_distance(a,b,v),point_distance(a+u,b,v),
+                point_distance(b,a,u),point_distance(b+v,a,u))
+            w=a-b;uu=u@u;vv=v@v;uv=u@v;det=uu*vv-uv*uv
+            if det>1e-14*uu*vv:
+                x=(uv*(v@w)-vv*(u@w))/det
+                y=(uu*(v@w)-uv*(u@w))/det
+                if 0<=x<=1 and 0<=y<=1:
+                    distance=min(distance,float(np.linalg.norm(w+x*u-y*v)))
+            minimum=(bores[i]+bores[j])/2
+            if distance<minimum-1e-10:
+                raise ValueError(f'{i+1}·{j+1}번 기둥 간섭: 최소 축 간격 {distance*1000:.3f} mm, '
+                    f'필요 최소 {minimum*1000:.3f} mm (안지름 기준, 관벽 두께 미포함). '
+                    'B를 늘리거나 기둥 수·지름·기울기를 조정하세요.')
+
+
 def validate(b, d):
     if d.xi_scope not in ('total','local'):raise ValueError('직접 ξ의 총손실/국부손실 구분을 확인하세요.')
     _=d.loss
@@ -401,22 +460,12 @@ def validate(b, d):
         u_dimensions(d)
     if d.leg_length is not None:
         if not np.isfinite(d.leg_length) or d.leg_length<=0:raise ValueError('기둥 관 길이는 유한한 양수여야 합니다.')
-    if not d.separate_u and is_tilted(d) and d.tilt>90:
-        # 안쪽으로 기울인 기둥이 이웃 기둥(방사형·U형은 가운데)에 닿지 않아야 한다.
-        feet,up,leg,*_=network(d)
-        legs=np.broadcast_to(np.asarray(leg,float),len(up))
-        axis_top=np.full(len(up),d.leg_length) if d.leg_length is not None else legs+d.freeboard/up[:,2]
-        reach=float(np.max(axis_top*np.linalg.norm(up[:,:2],axis=1)))
-        n=len(up)
-        room=d.B/n if d.shape=='피자 거치대' else d.B/2 if n==2 else d.B/(n-1)
-        if reach>room-d.diameter:
-            raise ValueError(f'안쪽으로 기울인 기둥 끝이 수평으로 {reach*100:.1f} cm 들어와 이웃 기둥(또는 가운데)과 부딪힙니다. '
-                f'허용 {max(room-d.diameter,0)*100:.1f} cm. 기울기를 90°에 가깝게 하거나 B를 늘리세요.')
     if d.leg_length is not None:
         if not np.isfinite(d.leg_length) or d.leg_length<=0:raise ValueError('기둥 관 길이는 유한한 양수여야 합니다.')
         if not d.separate_u:
             legs=np.broadcast_to(np.asarray(network(d)[2],float),column_count(d))
             if np.any(d.leg_length<=legs):raise ValueError('관 끝이 정지 수면보다 낮습니다. 관 길이를 늘리거나 물 질량을 줄이세요.')
+    validate_column_spacing(d)
     if not (math.isfinite(d.pipe_loss) and d.pipe_loss >= 0):
         raise ValueError('추가 국부 손실계수는 0 이상이어야 합니다.')
     if min(b.damping, b.container_mass, d.loss) < 0 or not 0 <= d.angle <= 180:
@@ -820,8 +869,9 @@ def draw_result(fig, axes, b, d, r, title):
         water.legend(fontsize=8);water.set(title='수면 높이 기준: 바닥 관 중심선',ylabel='실제 높이 [mm]')
     else:
         water.plot(r['t'], 1000*r['state'][:, 2], color='#0284c7')
-        for sign in [-1, 1]:
-            water.axhline(sign*1000*d.limit, color='#dc2626', ls='--')
+        rest,lower,upper=column_water_heights(d)
+        for bound in (lower[-1]-rest[-1],upper[-1]-rest[-1]):
+            water.axhline(1000*bound, color='#dc2626', ls='--')
         water.set(title='오른쪽 수면 변화(왼쪽은 반대가 됨)', ylabel='수면 변화 [mm]')
     for ax in [disp, accel, water]:
         ax.set_xlabel('시간 [s]'); ax.grid(alpha=0.2)
@@ -870,6 +920,8 @@ def save_result(folder, b, d, r, fig, title):
         '오리피스와 명시한 추가 관 손실 사용; 비정상 점성 이력·분기점 흐름 미해석',
         '수평관 천장 경계는 보수적 적용 제한이며 공기 유입 확정 조건 아님']
     payload['geometry_scope']=r.get('geometry_scope')
+    rest,lower,upper=column_water_heights(d)
+    payload['water_geometry']=dict(h_definition='volume parameter: vertical liquid volume = 2*A*h',h_m=d.h,rest_heights_m=rest.tolist(),lower_heights_m=lower.tolist(),upper_heights_m=upper.tolist(),column_spacing_basis='inner diameter; wall thickness excluded',tuning_ratio_x=d.frequency/tuning_frequency(b))
     payload['valid_interval_metrics']=partial_metrics(r)
     payload['building_summary']=building_summary(b,r)
     payload['input_application']=dict(
@@ -892,10 +944,15 @@ def sweep(b, d, t, ag, folder=None, metric="peak_reduction_vs_bare_pct"):
     for i, ratio in enumerate(ratios):
         for j, angle in enumerate(angles):
             test = replace(d, B=d.length*ratio, h=d.length*(1-ratio)/2, angle=float(angle))
-            r = simulate_space(b, test, t, ag); m = metrics(r)
+            reason=''
+            try:
+                r=simulate_space(b,test,t,ag);m=metrics(r)
+                tuning=test.frequency/tuning_frequency(b)
+            except ValueError as error:
+                r={'valid':False};m=None;tuning=None;reason=str(error)
             if m is not None and m['peak_reduction_vs_bare_pct'] is not None:
                 values[i, j] = m[metric]
-            rows.append({'B_over_L': ratio, 'angle_deg': angle, 'B_m': test.B, 'h_m': test.h,
+            rows.append({'B_over_L': ratio, 'angle_deg': angle, 'B_m': test.B, 'h_m': test.h, 'tuning_ratio_x':tuning,'reason':reason,
                          'water_mass_kg': test.mass, 'valid': r['valid'],
                          'peak_reduction_vs_bare_pct': m['peak_reduction_vs_bare_pct'] if m else '',
                          'rms_reduction_vs_bare_pct': m['rms_reduction_vs_bare_pct'] if m else '',
@@ -914,12 +971,12 @@ def sweep(b, d, t, ag, folder=None, metric="peak_reduction_vs_bare_pct"):
     for i in range(len(ratios)):
         for j in range(len(angles)):
             valid_run=rows[i*len(angles)+j]['valid']
-            label=f'{values[i,j]:+.{3 if pizza else 1}f}%' if np.isfinite(values[i,j]) else ('기준값 0' if valid_run else '한계 초과')
+            label=f'{values[i,j]:+.{3 if pizza else 1}f}%' if np.isfinite(values[i,j]) else ('기준값 0' if valid_run else '치수 오류' if rows[i*len(angles)+j]['reason'] else '한계 초과')
             ax.text(j, i, label, ha='center', va='center', fontsize=9)
-    ax.set(xticks=range(len(angles)), xticklabels=angles, yticks=range(len(ratios)), yticklabels=ratios,
+    ax.set(xticks=range(len(angles)), xticklabels=angles, yticks=range(len(ratios)), yticklabels=[f'{ratio:g} | r='+ (f"{rows[i*len(angles)]['tuning_ratio_x']:.4g}" if rows[i*len(angles)]['tuning_ratio_x'] is not None else '—') for i,ratio in enumerate(ratios)],
            xlabel='지진 방향과 1번 가지 사이 각도 [도]' if pizza else '지진 방향과 설치 방향 사이 각도 [도]',
-           ylabel='바닥 세 가지의 길이 합 / 전체 물 길이' if pizza else '가로 길이 비율 B/L',
-           title=('RMS' if metric.startswith('rms') else '최대')+' 건물 변위 저감률 · 장치 없음 대비\n총 물 길이·물 질량 일정 / 양수: 감소, 음수: 악화')
+           ylabel='B/L · 현재 조율비 r (X 1차 기준)',
+           title=('RMS' if metric.startswith('rms') else '최대')+' 건물 변위 저감률 · 장치 없음 대비\n총 물 길이·물 질량 일정 · 자동 재조율 없음 / 양수: 감소, 음수: 악화')
     fig.colorbar(im, ax=ax, label='저감률 [%]')
     if folder is not None: fig.savefig(folder/'sweep.png', dpi=160)
     plt.close(fig)
@@ -2368,9 +2425,9 @@ def lab(b,d,t,ag,title,out):
             '피자 거치대':'가운데~각 기둥 거리의 합 B (cm)',
             '다기둥형':'양 끝 기둥 중심선 간 거리 B (cm)'}
         if 'B' in dimension_labels:dimension_labels['B'].set(meanings[shape])
-        if 'h' in dimension_labels:dimension_labels['h'].set('수평관 중심선에서 정지 수면까지 h (cm)' if shape=='U형' else '기준 U형의 h · 물 총량 설정 기준 (cm)')
+        if 'h' in dimension_labels:dimension_labels['h'].set('기준 U형 환산 물높이 h (cm, 물량 기준)')
 
-    for key,label,value in [('B','바닥 수평관 중심선 간 거리 B (cm)',d.B*100),('h','수평관 중심선에서 정지 수면까지 h (cm)',d.h*100),
+    for key,label,value in [('B','바닥 수평관 중심선 간 거리 B (cm)',d.B*100),('h','기준 U형 환산 물높이 h (cm, 물량 기준)',d.h*100),
               ('diameter','관 안지름 D_i (cm)',d.diameter*100),('angle','설치 각도 (°)',d.angle),
               ('beta','오리피스 개구비 β',d.beta)]:
         row=ttk.Frame(pipe_page); row.pack(fill='x',pady=3)
@@ -2400,6 +2457,9 @@ def lab(b,d,t,ag,title,out):
     ttk.Label(pipe_page,text='각 기둥 관 길이 (cm, 관 축 기준)').pack(anchor='w')
     ttk.Entry(pipe_page,textvariable=tube_length_var,width=10).pack(anchor='w')
     ttk.Label(pipe_page,text='빈칸은 기존 자동 길이 · 물높이와 별개\nV형 수직 높이 = 관 길이 × sin(경사각)\n개별 U관 높이가 우선 · 빈 관 질량은 자동 변경 안 됨',wraplength=280).pack(anchor='w')
+    water_note=tk.StringVar()
+    ttk.Label(pipe_page,textvariable=water_note,wraplength=280,foreground='#30566a').pack(anchor='w')
+    ttk.Label(shape_page,text='형상·기둥 수·기울기를 바꾸면 같은 물량과 치수에서도 조율비가 달라집니다. 목표값 설정 또는 최적 설계 탐색으로 재조율하세요.\n간격 검사는 안지름 기준이며 관벽 두께는 미포함입니다.',wraplength=280,foreground='#30566a').pack(anchor='w')
     def preview_frequency(*_):
         # 실제 적용과 동일한 입력 경로를 사용한다. h 입력란은 계산 결과 표시용이다.
         if tune_mode.get():return
@@ -2415,10 +2475,13 @@ def lab(b,d,t,ag,title,out):
             bores,tops=leg_specs.get(shape_var.get(),((),()))
             trial=replace(d,bores=bores,tops=tops,columns=int(column_var.get()),shape=internal_shape(shape_var.get(),float(tilt_var.get()),bores,tops),
                 B=width,h=height,diameter=diameter,tilt=float(tilt_var.get()))
+            validate(b,trial)
+            water_note.set(column_surface_text(trial,b))
             fields['h'].set(f'{height*100:.9g}')
             omega_l.set(f'{2*np.pi*trial.frequency:.9g}')
         except (ValueError,ZeroDivisionError,np.linalg.LinAlgError):
             omega_l.set('입력 확인')
+            water_note.set('입력 치수·기둥 간격을 확인하세요.')
     for key in ('B','diameter'):fields[key].trace_add('write',preview_frequency)
     water_var.trace_add('write',preview_frequency)
     column_var.trace_add('write',preview_frequency)
@@ -2873,6 +2936,9 @@ def lab(b,d,t,ag,title,out):
             if partial['metrics']:
                 value=partial['metrics']['rms_reduction_vs_bare_pct']
                 summary.set(summary.get()+f"\n유효 구간만 RMS 저감 {value:+.2f}%" if value is not None else summary.get())
+        if r.get('installed',True):
+            summary.set(summary.get()+'\n\n'+column_surface_text(dam,b))
+            water_note.set(column_surface_text(dam,b))
         scrub.configure(to=max(t[r['n_valid']-1],1e-12))
         position.set(0); draw_chart()
     def pause():
@@ -3795,7 +3861,7 @@ def lab(b,d,t,ag,title,out):
 
     def model_info():
         messagebox.showinfo('실험 모델',
-            '모양 선택만 바꾸면 물 총부피와 빈 관 질량이 유지됩니다. 바닥 총길이 B를 가지에 나누고, 기준 U형 물 높이 h의 두 배를 모든 다리에 나눕니다. V형은 수평 기준 경사각이며 피자 거치대는 120도 간격 3개, 다기둥형은 일렬 2~24개입니다. 독립 U관 3개는 같은 설치 층에 고정되며 관마다 좌우 물 부피 변화가 상쇄됩니다. 기둥 안지름을 바꾸면 물의 양을 유지하도록 정지 수면을 다시 계산합니다. 그림의 차단판 효과는 손실계수로 근사합니다.\n\n'
+            '모양 선택만 바꾸면 물 총부피와 빈 관 질량이 유지됩니다. 바닥 총길이 B를 가지에 나누고, 기준 U형 물 높이 h의 두 배를 모든 다리에 나눕니다. 기둥 기울기는 수평 기준입니다. 피자 거치대는 같은 각도 간격의 방사형 3~24기둥, 다기둥형은 일렬 2~24기둥입니다. h는 실제 수면 높이가 아닌 기준 U형 환산 물량값이며 실제 기둥별 수면은 형상에 따라 계산합니다. 기둥 안지름을 바꾸면 물의 양을 유지하도록 정지 수면을 다시 계산합니다. 그림의 차단판 효과는 손실계수로 근사합니다.\n\n'
             '진원 좌표는 건물을 기준으로 입력합니다. 가상 지진은 진원에서 건물로 향하는 수평선 방향으로 흔들린다고 가정합니다. 바로 아래 진원은 동쪽을 기준으로 사용합니다.\n\n'
             '세기는 진원 거리 10 km에서의 최대 가속도(g)입니다. 같은 파형에 거리 계수 √101 / √(거리²+1)을 곱합니다(거리 단위 km). 모든 기록은 진동 도착 시점부터 비교합니다. 실제 지반, 지진 규모, 파의 도착시간은 계산 범위 밖입니다.\n\n'
             '입력 적용 안내 · 물높이 h는 물 질량·관 안지름·B로 자동 계산합니다. 직접 강성 모드의 건물 omega는 결과 표시용입니다. 단방향 가진에서는 진원/세기 입력을 사용하지 않습니다.\n\n물 모델은 오리피스 손실과 명시한 추가 관 손실을 사용하며, 비정상 점성 이력은 미포함입니다. 분기관과 비대칭 관에서 경험식 적용 범위는 검증되지 않았습니다.\n\n물은 관을 따라 움직이는 한 물기둥으로 계산합니다. 물의 관성, 두 수면 높이 차에 따른 중력, 유속의 제곱에 비례하는 저항이 들어갑니다. 3D 화면은 이 계산값을 보여줍니다.\n\n건물은 선형 전단 모형으로 비틀림, 전도 회전, 소성 및 지반-기초 상호작용은 포함하지 않습니다. 물의 기포, 부분 충수, 접합부 3차원 흐름은 계산 범위 밖입니다. 이 효과의 계수와 구조 자료 없이 실제 응답을 보정했다고 주장할 수 없습니다.')
