@@ -54,9 +54,50 @@ n=1의 Power-law는 Poiseuille 관벽 저항을 포함하므로 원래 관벽 �
 추가 국부 손실계수 pipe_loss(기본 0, 사용자가 지정한 추가 국부 손실): 개구비 모드에서 오리피스 손실에 더한다.
   기본값은 0이며, 사용자가 명시한 저장값은 유지한다. 관벽 마찰을 임의로 추가하지 않는다.
   직접 ξ는 total(추가 벽면항 대체) 또는 local(벽면항 별도)로 구분한다.
-물 출렁임 처리 air_mode: 'stop'(기본, 수평관 천장에서 중단) / 'slug'(물기둥 미끄럼 근사, 표준 U형) / 'off'(참고).
-  slug는 빈 세로관의 복원력 제거와 수평 물 길이 감소를 라그랑주 방정식에서 유도했다. 맞춤 계수 없음.
+물 출렁임 처리 air_mode: 'stop'(기본) / 'slug'(물기둥 미끄럼 근사) / 'off'(참고).
+  stop 기준은 모든 형상 공통: 어느 기둥이든 수면이 수평관 천장 높이(중심선 위 D/2)에 닿으면 중단하며,
+  시작할 때 정지 수면이 이 높이 이하이면 계산하지 않는다(초기 충수 조건 미달). 기울어진 관은 축 길이로 환산.
+  slug는 U형·V형·비대칭 U형(물길 하나·기둥 둘)에 적용한다. 빈 기둥의 복원력 제거, 수평관 물 길이 감소에 따른
+  결합 감소(V형 경사관 몫은 유지), 기둥·수평관 단면 차이에 따른 유체 질량 변화를 라그랑주 방정식에서 유도했다.
+  보정력은 고정점 반복(암시적 중점법)으로 평가한다. 감쇠 없는 자유진동에서 SciPy 해와 1% 이내, 에너지 변화 0.3% 이내 확인.
+  맞춤 계수 없음. 기둥 3개 이상(일렬형·방사형)은 근사를 선택해도 정밀 기준(stop)으로 계산한다.
 '장치 없음'·'물 고정' 비교 건물의 절대가속도가 0으로 남던 원본 누락(baseline_blocks)을 수정했다.
+
+[공정 비교 도구 (분석 메뉴·오른쪽 버튼 '공정 비교 (모양별)')]
+같은 건물·물 질량·손실 설정·수면 처리·가진에서 모양마다 조율비 r·개구비 β·수평 길이 B를 따로 탐색한다.
+search_trial()로 모든 후보를 같은 r에 다시 조율하고 물 질량은 단면 조정으로 유지한다.
+최적화 가진 순위대로 확인하며 가진 4종(공진 사인·엘센트로·고베·멕시코시티)을 모두 끝까지 견디는 첫 설계를 고른다.
+그 설계를 가진 4종과 건물 진동수 ±10% 공진 사인으로 평가하여 U형 대비 차이를 표로 보인다.
+U형 외 모양은 실험 검증 전이며, 분기·꺾임 손실은 모양별로 따로 반영하지 않는다.
+
+[U형 기둥 기울기]
+화면에서 V형을 따로 고르지 않는다. U형의 '기둥 기울기'(90°=수직)를 90° 미만으로 두면 내부적으로 V형 연결망을 쓴다.
+기둥별 안지름·높이를 지정한 U형에는 기울기를 함께 쓸 수 없다. 예전 설정의 V형은 U형 + 기울기로 불러오고,
+예전 설정의 다른 형상에 남아 있던 V형 전용 경사각은 무시하고 90°로 불러온다.
+
+[지진 방향과 Y축 강성]
+지진 기록은 수평 한 성분이며, 진원 → 건물 방향으로 흔든다. 기본 진원(서쪽)은 X축과 나란하여 Y축 강성이
+결과에 영향을 주지 않는다. 진원을 대각선·남북 쪽에 두면 X·Y 강성이 모두 반영된다. 두 수평 성분 동시 입력은 미구현.
+
+[꺾임 각도 손실 · 장치 크기]
+기울인 U형(내부 V형)은 엘보가 기울기만큼만 꺾이므로 관 기본 손실 중 엘보 몫(82%)을 Idelchik 곡관 각도 계수
+비율로 줄인다(60°: 0.82배, 45°: 0.70배). 수직 U형은 입력값 그대로. 실험 검증 전의 교과서 기반 추정.
+요약 창과 최적 설계 탐색 표에 장치 가로(관 축)·높이를 표시한다. 관 두께는 포함하지 않는다.
+
+[관 모양 (v19)]
+모양 = 배치 × 기둥 수 × 기둥 기울기.
+  U형: 기둥 2개. 기울기를 90°가 아닌 값으로 두면 기울인 U형(내부 이름 V형)이 된다.
+  다기둥형(일렬형): 기둥 n개가 한 줄. 기울기는 양 끝 기둥에만, 가운데 기둥은 수직.
+  피자 거치대(방사형): 가운데에서 n개(3개 이상) 가지가 같은 간격으로 퍼지고 모든 기둥이 기울어진다.
+  기울기: 90°=수직, 90° 미만=바깥쪽, 90° 초과=안쪽(가운데 쪽). 안쪽 기둥이 이웃 기둥·가운데와 부딪히면 입력 오류.
+  기울기가 섞인 일렬형은 정지 수면 높이가 같도록 기둥별 물 길이(관 축)를 나눈다.
+  공기 유입 근사(slug)는 기둥 2개(U형·기울인 U형·비대칭 U형·2기둥 일렬형)에만, 그 밖은 stop으로 계산한다.
+  '독립 U관 3개'는 v19에서 뺐다. 예전 설정은 U형으로 불러온다.
+
+[건물 감쇠 방식]
+강성비례: C=(2ζ/ω₁)K. 1차 모드 감쇠비가 ζ이고 i차는 ζ·ω_i/ω₁ (층이 많으면 높은 모드를 과하게 줄임).
+모드 감쇠: 모든 모드 감쇠비 ζ. C=MΦ·diag(2ζω_i)·ΦᵀM, 구조 질량·층 강성 기준. 층이 많은 건물의 가속도 비교에 권장.
+직접 계수: 층간 dashpot c_i.
 
 [아직 반영하지 못한 물리]
 1차원 연속 물기둥과 선형 전단 건물의 근사이다. 공기 유입 이후·부분 충수·기포,
@@ -197,7 +238,7 @@ class Damper:
     freeboard: float = 0.12  # 정지 수면 위 여유 높이 [m]
 
     shape: str = 'U형'
-    tilt: float = 60.0  # V형 다리와 수평면 사이 각도
+    tilt: float = 90.0  # 기둥과 수평면 사이 각도. 90=수직, 90 미만=바깥쪽, 90 초과=안쪽으로 기울임
     reverse: bool = False
     columns: int = 4
     bores: tuple = ()  # 각 수직 기둥의 안지름(m). 빈 목록이면 공통 안지름.
@@ -209,15 +250,20 @@ class Damper:
 
     @property
     def separate_u(self):
-        return self.shape=='독립 U관 3개' or (self.shape=='U형' and bool(self.bores or self.tops))
+        return self.shape=='U형' and bool(self.bores or self.tops)
 
 
     @property
     def loss(self):
         if self.xi is not None:
             if not np.isfinite(self.xi) or self.xi<0:raise ValueError('직접 ξ는 유한한 0 이상 값이어야 합니다.')
-            return float(self.xi)+(self.pipe_loss if self.xi_scope=='local' else 0.)  # 총손실은 추가 관벽 항을 대체한다.
-        return orifice_loss(self.beta)+self.pipe_loss
+            return float(self.xi)+(self.effective_pipe_loss if self.xi_scope=='local' else 0.)  # 총손실은 추가 관벽 항을 대체한다.
+        return orifice_loss(self.beta)+self.effective_pipe_loss
+
+    @property
+    def effective_pipe_loss(self):
+        # 기울인 기둥은 엘보가 tilt°만 꺾인다(안쪽 기울기는 90° 초과). 수직(90°)이면 입력값 그대로.
+        return self.pipe_loss*bend_loss_factor(self.tilt) if is_tilted(self) else self.pipe_loss
 
     @property
     def rho(self):
@@ -251,11 +297,21 @@ class Damper:
         return min(self.h,self.freeboard if self.leg_length is None else self.leg_length-self.h)
 
 
+def is_tilted(d):
+    """기둥이 수직(90°)이 아닌가. U형은 화면에서 기울이면 내부적으로 V형이 된다."""
+    return d.shape in ('V형','다기둥형','피자 거치대') and not math.isclose(d.tilt,90.,abs_tol=1e-12)
+
+
+def column_count(d):
+    """연결된 기둥 수. 다기둥형(일렬형)·피자 거치대(방사형)는 기둥 수 입력을 따른다."""
+    return d.columns if d.shape in ('다기둥형','피자 거치대') else 2
+
+
 def equivalent_u(d):
     """동일 B,h,D를 가진 두 수직 물기둥. 형상 이름과 무관하게 같은 모델·경계를 사용한다."""
     return not d.separate_u and (d.shape=='U형' or
-        (d.shape=='다기둥형' and d.columns==2) or
-        (d.shape=='V형' and math.isclose(d.tilt,90.,abs_tol=1e-12)))
+        (d.shape=='다기둥형' and d.columns==2 and not is_tilted(d)) or
+        (d.shape=='V형' and not is_tilted(d)))
 
 
 @lru_cache(maxsize=256)
@@ -281,6 +337,18 @@ def structural_damping(b):
     if b.damping_mode=='강성비례':
         omega=tuning_frequency(b)*2*np.pi
         return 2*b.damping/omega*kx,2*b.damping/omega*ky
+    if b.damping_mode=='모드 감쇠':
+        # 모든 진동 모드가 같은 감쇠비 ζ를 갖도록 C = MΦ·diag(2ζω_i)·ΦᵀM (Φ는 질량 정규화 모드).
+        # 강성비례는 i차 모드 감쇠비가 ζ·ω_i/ω_1로 커져 층이 많을수록 높은 모드를 지나치게 줄인다.
+        # 구조 질량(관·물 제외)과 층 강성으로 정의하며, 다른 비교 건물에도 같은 행렬을 쓴다.
+        if not np.isfinite(b.damping) or b.damping<0:raise ValueError('감쇠비는 0 이상이어야 합니다.')
+        root=np.sqrt(m);matrices=[]
+        for K in (kx,ky):
+            w2,vectors=np.linalg.eigh(K/np.outer(root,root))
+            omega=np.sqrt(np.maximum(w2,0.))
+            shape=root[:,None]*vectors          # = M·Φ (Φ = vectors/√m)
+            matrices.append(shape@np.diag(2*b.damping*omega)@shape.T)
+        return tuple(matrices)
     if b.damping_mode!='직접 계수':raise ValueError('감쇠 입력 방식을 확인하세요.')
     matrices=[]
     for name,values in [('X',b.story_c),('Y',b.story_cy or b.story_c)]:
@@ -346,6 +414,26 @@ def wall_midpoint_velocity(rhs,transfer,c2,cn,index):
     return math.copysign(answer,rhs)
 
 
+# 관 기본 손실 중 벽 마찰 몫. Serbes(2024) 관에서 교과서 추정 마찰 약 0.2 / (마찰 0.2 + 90° 엘보 2개 0.9) ≈ 0.18.
+PIPE_FRICTION_SHARE = .18
+
+
+def bend_angle_coefficient(angle):
+    """Idelchik 곡관 각도 계수 A(δ): δ≤70° 0.9·sinδ, δ=90° 1.0, δ≥100° 0.7+0.35·δ/90. 70~90°는 선형 보간."""
+    if not 0 < angle <= 180: raise ValueError('꺾임 각도는 0° 초과 180° 이하입니다.')
+    if angle <= 70: return .9*math.sin(math.radians(angle))
+    if angle <= 90:
+        low = .9*math.sin(math.radians(70)); return low+(1-low)*(angle-70)/20
+    if angle < 100: return 1.+(.7+.35*100/90-1.)*(angle-90)/10
+    return .7+.35*angle/90
+
+
+def bend_loss_factor(tilt):
+    """수직 기둥(90° 엘보) 대비 관 기본 손실 배율. 벽 마찰 몫은 그대로, 엘보 몫만 각도 계수 비율로 바꾼다.
+    실험 검증 전의 교과서 기반 추정이다."""
+    return PIPE_FRICTION_SHARE+(1-PIPE_FRICTION_SHARE)*bend_angle_coefficient(tilt)/bend_angle_coefficient(90.)
+
+
 def orifice_loss(beta):
     if not np.isfinite(beta) or not 0<beta<=1:
         raise ValueError('오리피스 개구비 β는 0 초과, 1 이하여야 합니다.')
@@ -373,17 +461,31 @@ def validate(b, d):
     if not all(np.isfinite(x) and x>0 for x in (b.width,b.depth)):
         raise ValueError('건물 가로와 세로는 양수여야 합니다.')
     if not isinstance(d.columns,int) or not 2<=d.columns<=24:
-        raise ValueError('다기둥형 기둥 수는 2~24 사이 정수로 입력하세요.')
+        raise ValueError('기둥 수는 2~24 사이 정수로 입력하세요(방사형은 3 이상).')
+    if d.shape not in SHAPES or not 0<d.tilt<180: raise ValueError('관 종류와 기둥 기울기(0° 초과 180° 미만, 90°=수직)를 확인하세요.')
+    if d.shape=='피자 거치대' and d.columns<3: raise ValueError('피자 거치대(방사형)는 기둥이 3개 이상이어야 합니다.')
+    if min(b.mass, b.frequency, d.B, d.h, d.diameter, d.freeboard) <= 0:
+        raise ValueError('질량, 진동수, 길이와 지름은 양수여야 합니다.')
     if d.separate_u and min(d.B,d.h,d.diameter)>0:
         u_dimensions(d)
     if d.leg_length is not None:
         if not np.isfinite(d.leg_length) or d.leg_length<=0:raise ValueError('기둥 관 길이는 유한한 양수여야 합니다.')
+    if not d.separate_u and is_tilted(d) and d.tilt>90:
+        # 안쪽으로 기울인 기둥이 이웃 기둥(방사형·U형은 가운데)에 닿지 않아야 한다.
+        feet,up,leg,*_=network(d)
+        legs=np.broadcast_to(np.asarray(leg,float),len(up))
+        axis_top=np.full(len(up),d.leg_length) if d.leg_length is not None else legs+d.freeboard/up[:,2]
+        reach=float(np.max(axis_top*np.linalg.norm(up[:,:2],axis=1)))
+        n=len(up)
+        room=d.B/n if d.shape=='피자 거치대' else d.B/2 if n==2 else d.B/(n-1)
+        if reach>room-d.diameter:
+            raise ValueError(f'안쪽으로 기울인 기둥 끝이 수평으로 {reach*100:.1f} cm 들어와 이웃 기둥(또는 가운데)과 부딪힙니다. '
+                f'허용 {max(room-d.diameter,0)*100:.1f} cm. 기울기를 90°에 가깝게 하거나 B를 늘리세요.')
+    if d.leg_length is not None:
+        if not np.isfinite(d.leg_length) or d.leg_length<=0:raise ValueError('기둥 관 길이는 유한한 양수여야 합니다.')
         if not d.separate_u:
-            count={'피자 거치대':3,'다기둥형':d.columns}.get(d.shape,2)
-            if d.leg_length<=2*d.h/count:raise ValueError('관 끝이 정지 수면보다 낮습니다. 관 길이를 늘리거나 물 질량을 줄이세요.')
-    if d.shape not in SHAPES or not 0<d.tilt<=90: raise ValueError('관 종류와 V형 각도(0도 초과~90도)를 확인하세요.')
-    if min(b.mass, b.frequency, d.B, d.h, d.diameter, d.freeboard) <= 0:
-        raise ValueError('질량, 진동수, 길이와 지름은 양수여야 합니다.')
+            legs=np.broadcast_to(np.asarray(network(d)[2],float),column_count(d))
+            if np.any(d.leg_length<=legs):raise ValueError('관 끝이 정지 수면보다 낮습니다. 관 길이를 늘리거나 물 질량을 줄이세요.')
     if not (math.isfinite(d.pipe_loss) and d.pipe_loss >= 0):
         raise ValueError('추가 국부 손실계수는 0 이상이어야 합니다.')
     if min(b.damping, b.container_mass, d.loss) < 0 or not 0 <= d.angle <= 180:
@@ -766,7 +868,7 @@ def draw_result(fig, axes, b, d, r, title):
             geometry.plot(*np.stack((start,top)).T,color='#9bb2bf',lw=5)
             geometry.plot(*np.stack((start,start+direction*wet)).T,color='#258aae',lw=3)
             geometry.text(*top,str(i+1))
-        geometry.set_title(d.shape+' · 기둥 번호');geometry.set_axis_off()
+        geometry.set_title(shape_label(d)+' · 기둥 번호');geometry.set_axis_off()
     theta = math.radians(d.angle)
     plan.annotate('', xy=(1, 0), xytext=(-1, 0), arrowprops=dict(arrowstyle='->', color='#ef4444', lw=2))
     plan.plot([-math.cos(theta), math.cos(theta)], [-math.sin(theta), math.sin(theta)], color='#0284c7', lw=5)
@@ -987,7 +1089,7 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
         row=dict(cache[key]) if cache is not None and key in cache else None
         if row is not None:reused+=1
         if row is None:
-            row=dict(amplitude_g=amplitude,actual_peak_g=None,air_mode=air_mode,beta=float(beta),angle=float(angle),B=float(B),r=ratio,n=float(floor),mu_ref=float(mu),flow_index=float(index),fluid_scope='가상 유체 물성 최적화' if d.fluid_model=='Power-law' else '기존 물 모델',internal_steps=None,peak_displacement_m=None,rms_displacement_m=None,peak_acceleration_m_s2=None,rms_acceleration_m_s2=None,peak_acceleration_reduction_pct=None,peak_water_m=None,
+            row=dict(width_cm=None,depth_cm=None,height_cm=None,amplitude_g=amplitude,actual_peak_g=None,air_mode=air_mode,beta=float(beta),angle=float(angle),B=float(B),r=ratio,n=float(floor),mu_ref=float(mu),flow_index=float(index),fluid_scope='가상 유체 물성 최적화' if d.fluid_model=='Power-law' else '기존 물 모델',internal_steps=None,peak_displacement_m=None,rms_displacement_m=None,peak_acceleration_m_s2=None,rms_acceleration_m_s2=None,peak_acceleration_reduction_pct=None,peak_water_m=None,
                 h=None,diameter_m=None,area_m2=None,orifice_m2=None,mass_kg=d.mass,
                 rms_pct=None,peak_pct=None,status='',reason='',eligible=False,failure_time_s=None,completion_pct=0.,initial_h_m=None,initial_D_m=None,B_limit_m=None)
             try:
@@ -1000,9 +1102,11 @@ def search_designs(b,d,t,ag,betas,angles,lengths,require_peak=True,ratios=None,f
                 row.update(r=test.frequency/tuning_frequency(b) if ratio is None else float(ratio),h=test.h,diameter_m=test.diameter,
                     area_m2=test.area,orifice_m2=test.area*test.beta if test.xi is None else None,initial_h_m=test.h,initial_D_m=test.diameter,
                     B_limit_m=test.length-test.diameter if equivalent_u(test) else None)
+                extent=device_extent(test)   # 같은 공간 비교용: 장치 가로·세로·높이 (cm)
+                row.update(width_cm=100*extent[0],depth_cm=100*extent[1],height_cm=100*extent[2])
                 # 초기 물높이가 현재 충수 적용 경계보다 낮으면 적분 전에 별도 상태로 기록한다. 실제 공기 유입을 확정하는 판정은 아니다.
-                if air_mode=='stop' and equivalent_u(test) and test.h<=test.diameter/2:
-                    row.update(status='초기 충수 조건 미달',reason=f'h={test.h:.8g} m ≤ D_i/2={test.diameter/2:.8g} m; 현재 보수적 충수 적용 경계',failure_time_s=float(t[0]),completion_pct=0.)
+                if air_mode in ('stop','slug') and not initially_full(test):
+                    row.update(status='초기 충수 조건 미달',reason=f'정지 수면이 수평관 천장(D/2={test.diameter/2:.6g} m) 이하; 시작부터 공기가 있어 제외',failure_time_s=float(t[0]),completion_pct=0.)
                     if cache is not None:cache[key]=dict(row)
                     rows.append(row);report()
                     continue
@@ -1073,13 +1177,41 @@ def building_summary(b,r):
         rms_m=float(rms(r['state'][:,0],r['t'])) if r['valid'] else None)
 
 
-SHAPES=('U형','피자 거치대','V형','다기둥형','독립 U관 3개')
+SHAPES=('U형','피자 거치대','V형','다기둥형')
+# 화면에서는 V형을 따로 고르지 않고 U형의 '기둥 기울기'로 다룬다. 내부 계산은 기울기<90°일 때 V형 연결망을 그대로 쓴다.
+GUI_SHAPES=tuple(x for x in SHAPES if x!='V형')
+# 화면 표시 이름 ↔ 내부 이름. 저장 파일과 계산은 내부 이름을 그대로 쓴다.
+SHAPE_DISPLAY={'U형':'U형 (기둥 2개)','다기둥형':'일렬형 (기둥 여러 개)','피자 거치대':'방사형 (피자 거치대)'}
+SHAPE_INTERNAL={v:k for k,v in SHAPE_DISPLAY.items()}
 
-# 독립 U관 및 비대칭 U관의 단면적·정지 수면·관 끝 높이.
+
+def internal_shape(shape, tilt, bores=(), tops=()):
+    """화면 형상 + 기울기 → 내부 형상. U형이고 기울기가 90° 미만이면 V형 연결망."""
+    if shape == 'U형' and not math.isclose(tilt, 90., abs_tol=1e-12):
+        if bores or tops:
+            raise ValueError('기둥별 안지름·높이를 지정한 U형에는 기울기를 함께 쓸 수 없습니다. 기울기를 90°로 두거나 기둥 설정을 비우세요.')
+        return 'V형'
+    return shape
+
+
+def shape_label(d):
+    """결과 표시용 이름. 내부 V형은 'U형 (기울기 θ°)'로 보인다."""
+    side = '안쪽' if d.tilt > 90 else '바깥쪽'
+    if d.shape == 'V형' and is_tilted(d):
+        return f'U형 (기둥 기울기 {d.tilt:g}°, {side})'
+    if d.shape == '다기둥형':
+        return f'일렬형 {d.columns}기둥' + (f' (양 끝 기울기 {d.tilt:g}°, {side})' if is_tilted(d) else '')
+    if d.shape == '피자 거치대':
+        return f'방사형(피자) {d.columns}기둥' + (f' (기울기 {d.tilt:g}°, {side})' if is_tilted(d) else '')
+    if d.separate_u and d.shape == 'U형' and d.bores:
+        return 'U형 (기둥별 안지름 지정)'
+    return d.shape
+
+# 비대칭 U관의 단면적·정지 수면·관 끝 높이.
 # 관 끝 높이는 넘침 여유에만 사용한다. 물의 양은 물 질량 입력이 정하며 정지 시 같은 U관의 좌우 수면은 수평이다.
 def u_dimensions(d):
     # 같은 물 질량으로 비교한다. 바닥 관 길이 합은 B, 수직 부분 물 부피 합은 2Ah.
-    spans=d.B*(np.array([.25,.25,.5]) if d.shape=='독립 U관 3개' else np.ones(1))
+    spans=d.B*np.ones(1)
     count=2*len(spans)
     bores=np.array([d.diameter if x is None else x for x in d.bores] if d.bores else [d.diameter]*count,float)
     if len(bores)!=count or not np.isfinite(bores).all() or min(bores)<=0:
@@ -1094,15 +1226,13 @@ def u_dimensions(d):
         raise ValueError('각 기둥 끝은 정지 수면보다 높아야 합니다. 높이를 늘리거나 물을 줄이세요.')
     return spans,bores,areas,rest,tops
 
-# 세 독립 U관은 서로 물이 이동하지 않는다. 각 U관의 질량·강성 블록만 독립이다.
+# 비대칭 U관(기둥별 안지름·높이 지정). 물길 하나·기둥 둘이며 기둥 단면이 다를 수 있다.
 # 건물 자유도를 공유하므로 건물에 전달하는 힘을 통해 간접적으로 상호작용한다.
 def independent_network(d):
     spans,bores,areas,rest,tops=u_dimensions(d)
     count=len(spans)
     centers=np.zeros(count)
-    if count==3:
-        centers=np.array([-1,1,0])*(spans[0]/2+max(bores[:4])*.65)
-    base_z=np.array([0,0,max(tops[:4])+max(d.diameter,max(bores))]) if count==3 else np.zeros(1)
+    base_z=np.zeros(count)
     starts=np.column_stack([centers-spans/2,np.zeros(count),base_z])
     ends=starts.copy();ends[:,0]+=spans
     feet=np.stack([starts,ends],axis=1).reshape(-1,3)
@@ -1117,16 +1247,59 @@ def independent_network(d):
 
 # 관 형상 → feet/up/leg/starts/ends, S/T, 유체 M/K, 건물 결합항.
 # S@유체좌표는 각 기둥의 수면 변화, T@유체속도는 각 바닥 유로의 평균 유속. 각 연결망의 체적 보존을 만족한다.
+def initially_full(d):
+    """정지 상태에서 모든 기둥의 수면이 수평관 천장(중심선 위 D/2)보다 높은가. 모든 형상 공통 기준."""
+    feet, up, leg, *_ = network(d)
+    legs = np.broadcast_to(np.asarray(leg, float), up.shape[0])
+    return bool(np.all(legs*up[:, 2] > d.diameter/2))
+
+
+def slug_supported(d):
+    """물기둥 미끄럼 근사를 유도한 형상: 물길 하나·기둥 둘 (U형, 바깥/안쪽 기울인 U형, 비대칭 U형, 기둥 2개 일렬형)."""
+    if d.separate_u: return d.shape == 'U형'
+    return equivalent_u(d) or d.shape == 'V형' or (d.shape == '다기둥형' and d.columns == 2)
+
+
+def device_extent(d):
+    """관 장치가 차지하는 가로(관 축 X)·세로(Y)·높이(Z) [m]. 관 바깥지름 대신 안지름을 쓴다(관 두께 미포함).
+    기둥 끝은 '각 기둥 관 길이' 입력값, 없으면 정지 수면 + 여유 높이(freeboard)까지로 본다.
+    기울인 기둥은 바깥(또는 안쪽)으로 나간 만큼 가로에 포함된다. 높이는 수평관 바닥부터 기둥 끝까지."""
+    feet, up, leg, starts, ends, *_ = network(d)
+    n = up.shape[0]
+    legs = np.broadcast_to(np.asarray(leg, float), n)
+    if d.separate_u:
+        dims = u_dimensions(d); axis_top = np.asarray(dims[4], float); radii = np.asarray(dims[1], float)/2
+    else:
+        axis_top = np.full(n, d.leg_length) if d.leg_length is not None else legs+d.freeboard/up[:, 2]
+        radii = np.full(n, d.diameter/2)
+    tops = feet+up*axis_top[:, None]
+    pipe = np.vstack([starts, ends]); rp = d.diameter/2
+    lo = np.minimum.reduce([pipe.min(0)-rp, (feet-radii[:, None]).min(0), (tops-radii[:, None]).min(0)])
+    hi = np.maximum.reduce([pipe.max(0)+rp, (feet+radii[:, None]).max(0), (tops+radii[:, None]).max(0)])
+    lo[2] = min(pipe[:, 2].min(), feet[:, 2].min())-rp
+    hi[2] = tops[:, 2].max()
+    width, depth, height = hi-lo
+    return float(width), float(depth), float(height)
+
+
+def extent_text(d):
+    """요약 창에 붙일 장치 크기 문자열."""
+    try:
+        w, dpt, h = device_extent(d)
+        return f'\n장치 크기 가로 {100*w:.1f} · 세로 {100*dpt:.1f} · 높이 {100*h:.1f} cm'
+    except (ValueError, ZeroDivisionError, np.linalg.LinAlgError):
+        return ''
+
+
 def network(d):
     """각 가지의 물속 길이와 방향. 분기점에서 들어온 부피와 나간 부피가 같다."""
     if d.separate_u:return independent_network(d)
-    n={'피자 거치대':3,'다기둥형':d.columns}.get(d.shape,2)
-    leg=2*d.h/n
+    n=column_count(d)
     # 마지막 기둥의 수면을 나머지 기둥의 반대로 정해 같은 단면에서 총 물 체적을 보존한다.
     surface=np.vstack([np.eye(n-1),-np.ones(n-1)])
     # 세 바닥 가지의 중심선 길이 합을 B로 나눈다. 방위는 120도 간격이다.
     if d.shape=='피자 거치대':
-        az=np.arange(n)*2*np.pi/n
+        az=np.arange(n)*2*np.pi/n  # 방사형: 가운데에서 n개 가지가 같은 간격으로 퍼진다
         feet=d.B/n*np.column_stack((np.cos(az),np.sin(az),np.zeros(n)))
         starts=np.zeros_like(feet); ends=feet.copy(); paths=surface
     else:
@@ -1134,18 +1307,34 @@ def network(d):
         # 일렬 연결관에서는 누적 체적 이동으로 각 바닥 구간의 유속을 결정한다.
         starts=feet[:-1];ends=feet[1:];paths=-np.cumsum(surface,axis=0)[:-1]
     up=np.tile([0.,0.,1.],(n,1))
-    if d.shape=='V형':
-        tilt=np.radians(d.tilt)
-        up[:,0]=[-np.cos(tilt),np.cos(tilt)];up[:,2]=np.sin(tilt)
-        if equivalent_u(d):up[:]=[0.,0.,1.]
+    if is_tilted(d):
+        tilt=np.radians(d.tilt)   # 90° 미만은 바깥쪽, 90° 초과는 안쪽(가운데 쪽)으로 눕는다
+        if d.shape=='피자 거치대':
+            outward=feet[:,:2]/np.linalg.norm(feet[:,:2],axis=1)[:,None]
+            up[:,:2]=np.cos(tilt)*outward;up[:,2]=np.sin(tilt)
+        else:
+            # 일렬형(U·V 포함): 양 끝 기둥만 바깥(안쪽)으로 기울이고 가운데 기둥은 수직.
+            up[0]=[-np.cos(tilt),0.,np.sin(tilt)];up[-1]=[np.cos(tilt),0.,np.sin(tilt)]
+    # 기둥 물 길이(관 축 방향). 정지 상태에서 모든 수면 높이가 같고 물 총량이 2Ah이다.
+    if np.allclose(up[:,2],up[0,2],rtol=0,atol=0):
+        leg=2*d.h/n
+    else:
+        rest=2*d.h/np.sum(1/up[:,2])
+        leg=rest/up[:,2]
     delta=ends-starts
     length=np.linalg.norm(delta,axis=1)
     rhoA=d.rho*d.area
     # 관 길이별 유체 운동에너지에서 유체 질량행렬을 만든다.
-    inertia=rhoA*(leg*surface.T@surface+paths.T@(length[:,None]*paths))
+    if np.ndim(leg)==0:
+        inertia=rhoA*(leg*surface.T@surface+paths.T@(length[:,None]*paths))
+    else:
+        inertia=rhoA*(surface.T@(leg[:,None]*surface)+paths.T@(length[:,None]*paths))
     # 수면 높이 차의 중력 위치에너지에서 복원 강성을 만든다. V형의 수직 성분도 반영한다.
     spring=rhoA*G*surface.T@(up[:,2,None]*surface)
-    coupling=rhoA*(delta[:,:2].T@paths+leg*up[:,:2].T@surface)
+    if np.ndim(leg)==0:
+        coupling=rhoA*(delta[:,:2].T@paths+leg*up[:,:2].T@surface)
+    else:
+        coupling=rhoA*(delta[:,:2].T@paths+up[:,:2].T@(leg[:,None]*surface))
     return feet,up,leg,starts,ends,surface,paths,inertia,spring,coupling
 
 
@@ -1156,9 +1345,11 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
     """수평 두 축의 다층 건물과 연결된 물기둥들의 결합 운동을 적분한다.
 
     air_mode: 'stop'  수면이 수평관 천장에 닿으면 계산 중단(기본, 보수적)
-              'slug'  물기둥 미끄럼 근사(표준 U형만). 한쪽 세로관이 비면 물기둥 끝이
-                      수평관 안으로 들어간다고 보고, 빈 기둥의 복원력과 수평 물 길이 감소를
-                      라그랑주 방정식에서 유도한 보정력으로 넣는다. 맞춤 계수 없음.
+              'slug'  물기둥 미끄럼 근사(U형·V형·비대칭 U형). 한쪽 기둥이 비면 물기둥 끝이
+                      수평관 안으로 들어간다고 보고, 빈 기둥의 복원력 제거·수평 물 길이 감소·
+                      기둥과 수평관 단면 차이에 따른 질량 변화를 라그랑주 방정식에서 유도해 보정력으로 넣는다.
+                      맞춤 계수 없음.
+    정밀(stop) 기준은 모든 형상 공통: 어느 기둥이든 수면이 수평관 천장 높이(중심선 위 D/2)에 닿으면 중단.
               'off'   판정 없이 선형 연속 물기둥 그대로(참고 계산)
     air_mode가 없으면 air_check=True → 'stop', False → 'off'."""
     # network()가 선택한 형상을 수면 변환 S, 유속 변환 T 및 유체 행렬로 바꾸어 반환하는 지점.
@@ -1228,33 +1419,44 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
     wall_coefficient=power_wall_coefficient(d)
     flow_eye=np.eye(len(starts))
     # 정지 수면에서 관 끝까지의 상승 여유. 비대칭 관은 기둥마다 값이 다를 수 있다.
-    clearance=u_dimensions(d)[4]-leg if d.separate_u else d.leg_length-leg if d.leg_length is not None else d.freeboard/up[0,2]
+    clearance=u_dimensions(d)[4]-leg if d.separate_u else d.leg_length-leg if d.leg_length is not None else (d.freeboard/up[0,2] if np.ndim(leg)==0 else d.freeboard/up[:,2])
     # 일반 원형 U관의 보수적인 전단면 충수 적용 경계.
     # 수평 관 중심선 z=0, 내측 천장 z=D/2. 접합부/자유수면의 3차원 형상은 미해석.
     # 이는 공기 유입을 확정하는 실험식이 아니라 고전 물기둥 모델의 적용 제한이다.
     standard_u=installed and equivalent_u(d)
     mode=air_mode or ('stop' if air_check else 'off')
     if mode not in ('stop','slug','off'):raise ValueError('air_mode는 stop, slug, off 중 하나입니다.')
-    if mode=='slug' and not (standard_u and modes==1):mode='stop'   # 근사는 표준 U형에서만 유도했다.
-    # 수면 변화량의 하한이다. 기준이 정지 수면이므로 아래 방향은 음수이다.
-    lower_rise=np.broadcast_to(-np.asarray(leg),S.shape[0]).copy()
-    if standard_u and mode=='stop':lower_rise+=d.diameter/2
+    if mode=='slug' and not (installed and modes==1 and S.shape[0]==2 and slug_supported(d)):mode='stop'   # 유도한 형상만 근사
+    # 수면 변화량(관 축 방향)의 하한. 기준이 정지 수면이므로 아래 방향은 음수이다.
+    # 모든 형상 공통: 수면 높이가 수평관 천장(중심선 위 D/2)에 닿는 지점. 기울어진 관은 축 길이로 환산한다.
+    legs=np.broadcast_to(np.asarray(leg,float),S.shape[0]).copy()
+    stop_lower=-legs+(d.diameter/2)/up[:,2]
+    lower_rise=stop_lower.copy()
     slug=mode=='slug'
     if slug:
+        # 기둥 단면 A_j, 수평관 단면 A_h. 빠져나간 기둥 길이 over_j가 수평관에 A_j/A_h배 길이로 들어간다.
+        column_area=u_dimensions(d)[2] if d.separate_u else np.full(2,d.area)
+        A_h=d.area;s_up=up[:,2].astype(float);sl=S[:,0].astype(float)
+        vol_ratio=column_area/A_h
+        gravity_coef=d.rho*G*column_area*s_up                      # 기둥별 ρgA_j sinθ_j
+        mass_coef=d.rho*(A_h**2-column_area**2)/column_area         # 수평관 유입에 따른 유체 질량 변화율
         # 물기둥 뒤끝이 수평관 가운데(오리피스)에 닿으면 근사 범위를 벗어난다.
-        lower_rise=np.broadcast_to(-np.asarray(leg),S.shape[0])-d.B/2
-        legs=np.broadcast_to(np.asarray(leg,float),S.shape[0])
-        rga=d.rho*G*d.area
-        fa=np.arange(2*n,2*n+modes)
-        exc_att=excitation[attached]
-        cross_b=cross/d.B
-        def slug_state(qf):
-            over=np.maximum(-(legs+S@qf),0.)            # 각 세로관에서 빠져나간 물 길이(중심선 기준)
-            return over,over.sum(),-(S.T@(over>0))       # 빈 길이, 수평관에 들어간 길이 e, de/dq
+        lower_rise=-legs-(d.B/2)/vol_ratio
+        # 건물-유체 결합 중 수평관 물 몫만 줄어든다. V형 경사관 몫은 그대로 둔다.
+        horizontal_coupling=d.rho*d.area*((ends-starts)[:,:2].T@T)
+        cross_h=(rot@horizontal_coupling)[:,0] if installed else np.zeros(2)
+        fpos=2*n
+        exc_att=excitation[attached].astype(float)
+        attach0,attach1=attached
         a_prev=np.zeros(len(active));gm_prev=0.
-        slope0,slope1=map(float,S[:,0]);leg0,leg1=map(float,legs)
-        attach0,attach1=attached;cross0,cross1=map(float,cross[:,0])
-        ground_cross=float(cross[:,0]@exc_att)
+        def slug_terms(yf):
+            over=np.maximum(-(legs+sl*yf),0.)
+            if not over.any():return None
+            on=over>0
+            e=float(vol_ratio@over);de=-float((vol_ratio*sl)@on)
+            dm=float(mass_coef@over);dmd=-float((mass_coef*sl)@on)
+            grav=-float(sl@(gravity_coef*over))
+            return e,de,dm,dmd,grav
     q=np.zeros(size);v=np.zeros(size)
     # 시간별 좌표 Q와 속도 V. 계산하지 못한 구간은 NaN으로 남겨 정상 결과와 구분한다.
     Q=np.full((len(t),size),np.nan);V=Q.copy();Q[0]=q;V[0]=v
@@ -1273,9 +1475,11 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
     import hashlib
     excitation_key=hashlib.sha256(original_t.tobytes()+original_ag.tobytes()).digest()
     t=t.copy();ag=ag.copy()
-    if installed and mode=='stop' and standard_u and np.any(lower_rise>=0):
+    # 정밀·근사 모두 시작할 때 관이 물로 꽉 차 있어야 한다(모든 형상 공통). 정지 수면이 수평관 천장 이하면 계산하지 않는다.
+    if installed and mode in ('stop','slug') and np.any(stop_lower>=0):
         failure=float(t[0]);failure_kind='모델 적용 범위 초과'
-        failure_detail=f'초기 상태 · 기둥 1·2 · h={d.h*1000:.3f} mm, 수평관 천장 D/2={d.diameter*500:.3f} mm. 전단면 충수를 보장할 수 없어 공기 유입 가능 상태의 유체 계산 제한.'
+        failure_detail=(f'초기 상태 · 정지 수면 높이 {float(np.min(legs*up[:,2]))*1000:.3f} mm ≤ 수평관 천장 D/2={d.diameter*500:.3f} mm. '
+            '시작부터 수평관에 공기가 있어 물기둥 모델을 적용할 수 없음(초기 충수 조건 미달).')
 
     # 단일 유로 물 모델에서는 중점법의 선형 부분을 한 번의 행렬곱으로 묶는다.
     fast_water=installed and modes==1 and len(weights)==1 and not wall_coefficient and not slug
@@ -1312,7 +1516,7 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
             if slug:
                 hinv=h*inv
                 slug_fluid_correction=hinv[:,-1]
-                slug_building_correction=(hinv[:,attach0]*cross0+hinv[:,attach1]*cross1)/d.B
+                slug_building_correction=(hinv[:,attach0]*cross_h[0]+hinv[:,attach1]*cross_h[1])/d.B
             if fast_water:
                 eye=np.eye(dimension)
                 transition=np.block([[eye+dt*qm,dt*vm],[2*qm,2*vm-eye]])
@@ -1344,34 +1548,51 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
             # 입력 기록 두 표본 사이의 중간 시각 가속도. 단위는 m/s²이다.
             gm=ag[i-1]+(ag[i]-ag[i-1])*(j+.5)/count
             # 비선형 오리피스 저항을 적용하기 전의 중점 속도 예측값.
-            free=vm@v[active]+qm@q[active]+force*gm
-            if slug:
-                # 표준 U관은 기둥 둘/유체 자유도 하나이다. 같은 보정력을 스칼라로 평가해
-                # 매 내부 단계의 작은 배열·행렬 생성 비용만 줄인다.
-                yf=float(q[fluid]);over0=max(-(leg0+slope0*yf),0.);over1=max(-(leg1+slope1*yf),0.)
-                empty=over0+over1
-                if empty>0:
-                    derivative=-(slope0*(over0>0)+slope1*(over1>0))
-                    extra_fluid=-rga*(slope0*over0+slope1*over1)+(empty/d.B)*(cross0*a_prev[attach0]+cross1*a_prev[attach1]+ground_cross*gm_prev)
-                    extra_building=empty*a_prev[-1]+derivative*float(v[fluid])**2
-                    free=free+slug_fluid_correction*extra_fluid+slug_building_correction*extra_building
-            if scalar_flow:
-                rhs=scalar_path*float(free[-1])
-                if wall_coefficient:
-                    velocity=wall_midpoint_velocity(rhs,float(transfer[0,0]),float(weights[0]),wall_coefficient,d.flow_index)
-                    full_mid[active]=free-wall_drag*(weights[0]*abs(velocity)*velocity+wall_coefficient*math.copysign(abs(velocity)**d.flow_index,velocity))
+            free0=vm@v[active]+qm@q[active]+force*gm
+            def solve_mid(free):
+                # 저항(오리피스·관벽)을 포함해 중점 속도 full_mid를 구한다.
+                if scalar_flow:
+                    rhs=scalar_path*float(free[-1])
+                    if wall_coefficient:
+                        velocity=wall_midpoint_velocity(rhs,float(transfer[0,0]),float(weights[0]),wall_coefficient,d.flow_index)
+                        full_mid[active]=free-wall_drag*(weights[0]*abs(velocity)*velocity+wall_coefficient*math.copysign(abs(velocity)**d.flow_index,velocity))
+                    else:
+                        velocity=2*rhs/(1+math.sqrt(1+4*scalar_coefficient*abs(rhs)))
+                        full_mid[active]=free-scalar_drag*(abs(velocity)*velocity)
                 else:
-                    velocity=2*rhs/(1+math.sqrt(1+4*scalar_coefficient*abs(rhs)))
-                    full_mid[active]=free-scalar_drag*(abs(velocity)*velocity)
+                    rhs=T@free[-modes:];flow=rhs.copy()
+                    for _ in range(20):
+                        # 여러 유로는 유속과 저항의 연성 방정식을 Newton 반복으로 푼다. 수렴 실패는 오류로 보고한다.
+                        residual=flow+transfer@(weights*abs(flow)*flow)-rhs
+                        if max(abs(residual))<1e-11*(1+max(abs(rhs))):break
+                        flow-=np.linalg.solve(flow_eye+transfer*(2*weights*abs(flow)),residual)
+                    else:raise ValueError('유체 저항 계산이 수렴하지 않았습니다. 입력 조건을 확인하세요.')
+                    full_mid[active]=free-drag@(T.T@(weights*abs(flow)*flow))
+            if slug:
+                # 기둥 둘/유체 자유도 하나. 선형 모형과의 차이를 보정력으로 더한다.
+                # 유체: 중력 복원력 제거, 수평관 결합 감소(e/B), 질량 변화 Δm(q)의 Δm·q̈+½Δm'·q̇².
+                # 건물: 결합 감소분의 q̈ 반력과 결합 변화율에 따른 q̇² 항.
+                # 암시적 중점법: 보정력을 같은 단계의 중점 상태(위치 q+h·v중점, 속도 v중점, 가속도 (v다음-v)/dt)로
+                # 평가하도록 고정점 반복한다. 직전 단계 값을 쓰면 감쇠가 없는 긴 계산에서 에너지 오차가 쌓인다.
+                qf0=float(q[fluid]);est_q=qf0;est_v=float(v[fluid]);est_acc=a_prev.copy()
+                for _iteration in range(8):
+                    terms=slug_terms(est_q)
+                    free=free0
+                    if terms is not None:
+                        e,de,dm,dmd,grav=terms
+                        qdd=float(est_acc[-1]);absolute=est_acc[attached]+exc_att*gm
+                        extra_fluid=grav+(e/d.B)*float(cross_h@absolute)-dm*qdd-.5*dmd*est_v*est_v
+                        extra_building=e*qdd+de*est_v*est_v
+                        free=free0+slug_fluid_correction*extra_fluid+slug_building_correction*extra_building
+                    solve_mid(free)
+                    mid_f=float(full_mid[fluid]);new_q=qf0+h*mid_f
+                    if terms is None and slug_terms(new_q) is None:break
+                    new_acc=2*(full_mid[active]-v[active])/dt
+                    change=abs(new_q-est_q)+h*abs(mid_f-est_v)
+                    est_q=new_q;est_v=mid_f;est_acc=new_acc
+                    if change<1e-13*(1+abs(qf0)):break
             else:
-                rhs=T@free[-modes:];flow=rhs.copy()
-                for _ in range(20):
-                    # 여러 유로는 유속과 저항의 연성 방정식을 Newton 반복으로 푼다. 수렴 실패는 오류로 보고한다.
-                    residual=flow+transfer@(weights*abs(flow)*flow)-rhs
-                    if max(abs(residual))<1e-11*(1+max(abs(rhs))):break
-                    flow-=np.linalg.solve(flow_eye+transfer*(2*weights*abs(flow)),residual)
-                else:raise ValueError('유체 저항 계산이 수렴하지 않았습니다. 입력 조건을 확인하세요.')
-                full_mid[active]=free-drag@(T.T@(weights*abs(flow)*flow))
+                solve_mid(free0)
             mid=full_mid
             old_q=q;old_v=v
             # 중점 속도로 좌표를 업데이트한 뒤 중점 관계에서 다음 시각 속도를 계산한다.
@@ -1393,9 +1614,9 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
                 fraction,column,is_lower=min(candidates)
                 q=old_q+fraction*(q-old_q);v=old_v+fraction*(v-old_v)
                 failure=t[i-1]+(j+fraction)*dt
-                failure_kind=('모델 적용 범위 초과' if standard_u else '수면 하한 도달') if is_lower else '수면 상한 도달'
+                failure_kind='모델 적용 범위 초과' if is_lower else '수면 상한 도달'
                 failure_detail=f'{column+1}번 기둥 · {failure:.6f}초 (내부 단계 보간) · {failure_kind}'+(
-                    (' · 물기둥 끝이 수평관 가운데(오리피스)에 도달. 미끄럼 근사 범위 밖.' if slug else ' · 수평관 천장에 수면 도달, 공기 유입 가능. 이후 부분 충수 모델 미검증.') if standard_u and is_lower else '')
+                    (' · 물기둥 끝이 수평관 가운데(오리피스)에 도달. 미끄럼 근사 범위 밖.' if slug else ' · 수면이 수평관 천장 높이에 도달, 공기 유입 가능(모든 형상 공통 기준).') if is_lower else '')
                 # 원래 기록의 표본을 지우지 않고 경계 시각을 추가한다.
                 # 모든 설계는 동일한 원본 가진의 선형 보간을 받는다.
                 if failure<t[i]-1e-12:
@@ -1461,21 +1682,24 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
     if slug:
         # 표준 U관의 단일 유체 자유도에 한정한다. 기존 행렬식과 같은 Schur 보완식으로
         # 시각마다 작은 행렬을 복사·역산하던 작업을 일괄 계산한다. 물리식은 변경하지 않는다.
-        over=np.maximum(-(legs+Q[:nvalid,fluid:]@S.T),0.)
-        empty=over.sum(axis=1);rows=np.flatnonzero(empty>0)
+        yq=Q[:nvalid,fluid]
+        over=np.maximum(-(legs[None,:]+yq[:,None]*sl[None,:]),0.)
+        rows=np.flatnonzero(over.sum(axis=1)>0)
         if len(rows):
+            ov=over[rows];on=(ov>0).astype(float);qd=V[rows,fluid]
+            e=ov@vol_ratio;de=-(on@(vol_ratio*sl))
+            dm=ov@mass_coef;dmd=-(on@(mass_coef*sl))
             f=force[rows][:,active].copy()
-            de=-(over[rows]>0).astype(float)@S
-            f[:,fa]-=(rga*over[rows])@S
-            f[:,attached]+=(de*V[rows,fluid:]**2)@cross_b.T
-            scale=1-empty[rows]/d.B
-            # A는 층별 병진 질량의 대각행렬, c는 건물-유체 결합 열벡터이다.
-            diagonal=np.diag(Ma)[:2*n];coupling=Ma[:2*n,2*n]
-            inv_c=coupling/diagonal
+            f[:,fpos]+=-(ov*gravity_coef)@sl-.5*dmd*qd*qd
+            f[:,attach0]+=cross_h[0]/d.B*de*qd*qd;f[:,attach1]+=cross_h[1]/d.B*de*qd*qd
+            # 건물 블록은 대각 질량. 유효 결합 c_eff = c - (e/B)·c_h, 유효 유체 질량 m + Δm 으로 Schur 보완식을 푼다.
+            diagonal=np.diag(Ma)[:2*n];coupling=Ma[:2*n,fpos]
+            c_eff=np.repeat(coupling[None,:],len(rows),axis=0)
+            c_eff[:,attach0]-=e/d.B*cross_h[0];c_eff[:,attach1]-=e/d.B*cross_h[1]
             base=f[:,:2*n]/diagonal
-            schur=Ma[2*n,2*n]-scale**2*(coupling@inv_c)
-            fluid_acc=(f[:,2*n]-scale*(base@coupling))/schur
-            acc[np.ix_(rows,active[:2*n])]=base-(scale*fluid_acc)[:,None]*inv_c
+            schur=Ma[fpos,fpos]+dm-np.einsum('ij,ij->i',c_eff,c_eff/diagonal)
+            fluid_acc=(f[:,fpos]-np.einsum('ij,ij->i',base,c_eff))/schur
+            acc[np.ix_(rows,active[:2*n])]=base-fluid_acc[:,None]*c_eff/diagonal
             acc[rows,fluid]=fluid_acc
     for indices,mb in baseline_blocks:
         acc[:,indices]=np.linalg.solve(mb,force[:,indices].T).T
@@ -1503,7 +1727,7 @@ def network_response(b,d,t,ag,installed=True,baseline_cache=None,air_check=True,
         geometry_scope='수평관 천장 기준 보수적 충수 제한; 실제 접합부 공기 유입 시각 미확정' if standard_u else '기존 형상별 물기둥 근사',
         failure_kind=failure_kind,failure_detail=failure_detail,
         floor_bare_y=Q[:,4*n:5*n],
-        levels=heights,rest_height=leg*up[0,2],
+        levels=heights,rest_height=leg*up[0,2] if np.ndim(leg)==0 else leg*up[:,2],
         state=np.column_stack([Q[:,roof],V[:,roof],heights[:,-1],speeds[:,-1],Q[:,bare],V[:,bare],Q[:,fixed],V[:,fixed]]),
         acc=acc[:,[bare,fixed,roof]],lateral=np.column_stack([Q[:,2*n-1],V[:,2*n-1]]),lateral_acc=acc[:,2*n-1],
         valid=failure is None,failure_time=failure,n_valid=nvalid)
@@ -1600,6 +1824,186 @@ def acceleration_table(result,start=None,end=None):
             rms_reduction_pct=reduction(br,ar) if valid else None,
             status='유효 평가 구간' if valid else '유체 미완료: 전체 성능 산출 불가'))
     return rows
+
+# ── 공정 비교 도구 ─────────────────────────────────────────────────
+# 원칙: (1) 같은 건물·물 질량·손실 설정·수면 처리·가진, (2) 모양마다 조율비 r·개구비 β·수평 길이 B를
+# 각자 최적화한 뒤 최선끼리 비교, (3) 여러 가진과 건물 진동수 ±10%에서 검증.
+# 모양만 바꾸면 TLCD 진동수가 바뀌므로, search_trial()로 모든 후보를 같은 r에 다시 조율하고
+# 물 질량은 단면을 함께 조정해 유지한다. 성능 계산은 주 실험실과 같은 simulate_space()를 쓴다.
+FAIR_EXCITATIONS = ('공진 사인', '엘센트로 지진', '고베지진', '멕시코시티 지진')
+
+
+def fair_candidate(d, label, tilt=60., columns=3, bore_ratio=1.4):
+    """기준 장치 d에서 모양만 바꾼 후보를 만든다. 물 질량·손실 설정·각도는 그대로 둔다."""
+    base = replace(d, bores=(), tops=(), leg_length=None)
+    if label == 'U형':
+        return replace(base, shape='U형', tilt=90.)
+    if label == '기울인 U형':
+        if not 0 < tilt < 180 or math.isclose(tilt, 90.): raise ValueError('기둥 기울기는 0°~180° 사이, 90°가 아닌 값입니다(90°는 기준 U형, 90° 초과는 안쪽).')
+        return replace(base, shape='V형', tilt=float(tilt))
+    if label == '다기둥형':
+        if int(columns) != columns or not 3 <= columns <= 24: raise ValueError('일렬형 기둥 수는 3~24의 정수입니다.')
+        return replace(base, shape='다기둥형', columns=int(columns), tilt=90.)
+    if label == '피자 거치대':
+        if int(columns) != columns or not 3 <= columns <= 24: raise ValueError('방사형(피자) 기둥 수는 3~24의 정수입니다.')
+        return replace(base, shape=label, columns=int(columns), tilt=90.)
+    if label == '비대칭 U형':
+        if not bore_ratio > 0 or bore_ratio == 1: raise ValueError('비대칭 지름비는 1이 아닌 양수여야 합니다.')
+        return replace(base, shape='U형', tilt=90., bores=(d.diameter*bore_ratio, d.diameter))
+    raise ValueError(f'알 수 없는 후보: {label}')
+
+
+def fair_label(label, tilt=60., columns=3, bore_ratio=1.4):
+    return {'기울인 U형': f'U형 기둥 기울기 {tilt:g}°'+(' (안쪽)' if tilt > 90 else ''), '다기둥형': f'일렬형 {columns:g}기둥',
+            '피자 거치대': f'방사형(피자) {columns:g}기둥',
+            '비대칭 U형': f'비대칭 U형 (지름비 {bore_ratio:g}:1)'}.get(label, label)
+
+
+def device_height(d):
+    """관 축 끝(넘침 한계)까지의 최대 세로 높이[m]. 수평관 중심선 기준."""
+    feet, up, leg, *_ = network(d)
+    leg = np.broadcast_to(np.asarray(leg, float), up.shape[0])
+    if d.separate_u: top = np.broadcast_to(u_dimensions(d)[4], up.shape[0])
+    elif d.leg_length is not None: top = np.full(up.shape[0], d.leg_length)
+    else: top = leg + d.freeboard/up[:, 2]
+    return float(np.max(top*up[:, 2]))
+
+
+def fair_excitations(b, sine_amplitude_g=.01):
+    """비교용 가진 4종. 지진은 내장 기록(최대 0.03 g), 공진 사인은 건물 1차 진동수·39회·quintic 3주기 램프."""
+    f = tuning_frequency(b)
+    out = {'공진 사인': laboratory_input(round(f, 4), sine_amplitude_g, '가속도 진폭 (g)', 39, None,
+                                     ramp_start=3/f, ramp_end=3/f, ramp_profile='quintic')[:2]}
+    for kind in FAIR_EXCITATIONS[1:]:
+        out[kind] = quake_wave(kind)
+    return out
+
+
+def _fair_score(result):
+    m = metrics(result)
+    lower = np.min(np.abs(result['lower_water'])) if np.isfinite(result['lower_water']).all() else np.inf
+    upper = np.min(np.abs(result['upper_water']))
+    limit = min(lower, upper)
+    if m is None:
+        return dict(valid=False, peak=None, rms=None, acc=None, water_cm=None, margin=None,
+                    note=result.get('failure_detail', '수면 한계'))
+    water = m['peak_water_displacement_m']
+    return dict(valid=True, peak=m['peak_reduction_vs_bare_pct'], rms=m['rms_reduction_vs_bare_pct'],
+                acc=m['acceleration_reduction_vs_bare_pct'], water_cm=100*water,
+                margin=100*(1-water/limit) if np.isfinite(limit) and limit > 0 else None, note='')
+
+
+def fair_comparison(b, d, candidates, optimize_on='엘센트로 지진', ratios=(.9, .95, 1.), betas=(.3, .5, .7, .9),
+                    lengths=None, air_mode='stop', metric='rms', max_height=None, sine_amplitude_g=.01,
+                    progress=None, stop=None, require_all=True, max_checks=40):
+    """candidates: [(라벨, 기준 이름, 매개변수 dict)]. 각 후보를 최적화한 뒤 가진 4종·건물 ±10%로 평가한다."""
+    if metric not in ('rms', 'peak'): raise ValueError('선정 기준은 rms 또는 peak입니다.')
+    floor = b.floor_data()[3] if not b.mount else b.mount
+    waves = fair_excitations(b, sine_amplitude_g)
+    if optimize_on not in waves: raise ValueError('최적화 가진을 확인하세요.')
+    t, ag = waves[optimize_on]
+    lengths = [d.B] if not lengths else list(lengths)
+    results = []
+    for index, (label, kind, params) in enumerate(candidates):
+        if stop is not None and stop.is_set(): break
+        item = dict(label=label, kind=kind, params=params, best=None, scores={}, robust={}, note='', searched=0, eligible=0)
+        results.append(item)
+        if progress is not None: progress.update(candidate=index+1, candidates=len(candidates), label=label, completed=0, total=0)
+        try:
+            cand = fair_candidate(d, kind, **params)
+            rows = search_designs(b, cand, t, ag, betas, [cand.angle], lengths, True, list(ratios), [floor],
+                                  stop=stop, progress=progress, air_mode=air_mode)
+        except ValueError as error:
+            item['note'] = str(error); continue
+        item['searched'] = len(rows)
+        key = 'rms_pct' if metric == 'rms' else 'peak_pct'
+        good = sorted([r for r in rows if r['eligible'] and r[key] is not None], key=lambda r: r[key], reverse=True)
+        item['eligible'] = len(good)
+        # 최적화 가진 하나에서만 1등이면 물이 한계에 걸친 설계가 뽑힐 수 있다. require_all이면
+        # 순위대로 확인하며 가진 4종을 모두 끝까지 견디는 첫 설계를 고른다(최대 max_checks개 확인).
+        chosen = None; checked = 0; rejected = {'height': 0, 'waves': 0}
+        for row in good:
+            if stop is not None and stop.is_set(): break
+            model, test = search_trial(b, cand, row['B'], row['r'], floor)
+            test = replace(test, beta=row['beta'], angle=row['angle'])
+            height = device_height(test)
+            if max_height is not None and height > max_height + 1e-12:
+                rejected['height'] += 1; continue
+            if checked >= max_checks: break
+            checked += 1
+            scores = {}
+            for name, (tt, aa) in waves.items():
+                scores[name] = _fair_score(simulate_space(model, test, tt, aa, air_mode=air_mode))
+                if require_all and not scores[name]['valid']: break
+            if require_all and not all(v['valid'] for v in scores.values()) or len(scores) < len(waves):
+                rejected['waves'] += 1; continue
+            chosen = (row, model, test, height, scores); break
+        item['checked'] = checked; item['rejected'] = rejected
+        if chosen is None:
+            item['note'] = '조건을 만족하는 설계 없음' + (f' · 높이 초과 {rejected["height"]}개' if rejected['height'] else '') + \
+                (f' · 다른 가진에서 물 한계 초과 {rejected["waves"]}개' if rejected['waves'] else '') + \
+                (f' · 상태 예: {rows[0]["status"]} {rows[0]["reason"][:60]}' if rows and not good else ''); continue
+        row, model, test, height, scores = chosen
+        item['best'] = dict(r=row['r'], beta=row['beta'], B=row['B'], h=test.h, diameter=test.diameter,
+                            mass=test.mass, height=height, tlcd_hz=test.frequency, building_hz=tuning_frequency(model),
+                            loss=test.loss, rank=good.index(row)+1)
+        item['scores'] = scores
+        for scale in (.9, 1.1):
+            if stop is not None and stop.is_set(): break
+            # TLCD는 그대로 두고 건물 강성만 바꿔 건물 진동수를 scale배로 만든 뒤 그 공진에서 흔든다.
+            shifted = replace(model, stories=tuple(k*scale**2 for k in model.stories),
+                              stories_y=tuple(k*scale**2 for k in model.stories_y))
+            f = tuning_frequency(shifted)
+            tt, aa = laboratory_input(round(f, 4), sine_amplitude_g, '가속도 진폭 (g)', 39, None,
+                                      ramp_start=3/f, ramp_end=3/f, ramp_profile='quintic')[:2]
+            item['robust'][scale] = _fair_score(simulate_space(shifted, test, tt, aa, air_mode=air_mode))
+    return results
+
+
+def fair_report_text(results, settings):
+    """공정 비교 결과를 표 문자열로 만든다. 기준은 목록의 첫 후보(U형)."""
+    fmt = lambda v: '   -  ' if v is None else f'{v:6.1f}'
+    names = list(FAIR_EXCITATIONS)
+    lines = ['[공정 비교] 같은 건물·물 질량·손실·수면 처리·가진에서, 모양마다 r·β·B를 따로 최적화한 최선끼리 비교',
+             f"최적화 가진: {settings['optimize_on']} · 선정 기준: {'RMS 변위 저감' if settings['metric']=='rms' else '최대 변위 저감'}"
+             f" · 수면 처리: {AIR_MODE_LABELS.get(settings['air_mode'], settings['air_mode'])}"
+             + (f" · 높이 제한 {settings['max_height']*100:g} cm" if settings.get('max_height') else ''),
+             f"고정 조건: 건물 1차 {settings['building_hz']:.3f} Hz · 물 {settings['water_kg']:.4g} kg · 손실 {settings['loss_text']}"
+             f" · 공진 사인 {settings['sine_amplitude_g']:g} g · 지진 최대 0.03 g", '']
+    base = next((r for r in results if r['best']), None)
+    for r in results:
+        lines.append(f"■ {r['label']}  (탐색 {r['searched']}개, 최적화 가진에서 선정 가능 {r['eligible']}개)")
+        if not r['best']:
+            lines.append(f"   최적 설계 없음: {r['note']}"); lines.append(''); continue
+        bst = r['best']
+        lines.append(f"   최적: r {bst['r']:.3g} · β {bst['beta']:.3g} · B {bst['B']*100:.1f} cm · h {bst['h']*100:.1f} cm · "
+                     f"안지름 {bst['diameter']*100:.2f} cm · 높이 {bst['height']*100:.1f} cm · 물 {bst['mass']:.4g} kg · 손실 {bst['loss']:.2f}")
+        if bst.get('rank', 1) > 1:
+            lines.append(f"   ※ 최적화 가진 순위 {bst['rank']}위 설계 (상위 설계는 다른 가진에서 물 한계 초과 또는 높이 초과)")
+        lines.append('   가진           최대변위저감%  RMS저감%  가속도저감%  물 최대cm  물 여유%   U형 대비(최대/RMS %p)')
+        for name in names:
+            s = r['scores'].get(name)
+            if s is None: continue
+            if not s['valid']:
+                lines.append(f"   {name:<12} 계산 중단: {s['note'][:70]}"); continue
+            diff = ''
+            if base is not r and base and base['scores'].get(name, {}).get('valid'):
+                bs = base['scores'][name]
+                diff = f"{s['peak']-bs['peak']:+6.1f} / {s['rms']-bs['rms']:+6.1f}"
+            lines.append(f"   {name:<12} {fmt(s['peak'])}      {fmt(s['rms'])}   {fmt(s['acc'])}     {fmt(s['water_cm'])}   {fmt(s['margin'])}   {diff}")
+        rb = r['robust']
+        if rb:
+            parts = []
+            for scale in (.9, 1.1):
+                s = rb.get(scale)
+                parts.append(f"건물 {int(round((scale-1)*100)):+d}%: " + (f"최대 {s['peak']:.1f}% / RMS {s['rms']:.1f}%" if s and s['valid'] else '계산 중단'))
+            lines.append('   강건성(공진 사인) ' + ' · '.join(parts))
+        lines.append('')
+    lines.append('선정 규칙: 최적화 가진 순위대로 확인하여 가진 4종을 모두 끝까지 견디는 첫 설계를 최적으로 선택.')
+    lines.append('읽는 법: 여러 가진·강건성에서 고루 U형보다 높으면 우수. 몇 %p 차이는 모델 불확실성(관 손실 등) 안일 수 있음.')
+    lines.append('U형 외 모양은 실험 검증 전이며, 분기·꺾임 손실은 모양별로 따로 반영하지 않았다.')
+    return '\n'.join(lines)
+
 
 def frequency_experiment(b,d,frequencies,amplitude,mode,cycles,measure_cycles,installed=True,air_mode='stop'):
     if not isinstance(cycles,int) or not isinstance(measure_cycles,int) or not 1<=measure_cycles<=cycles:
@@ -1738,29 +2142,44 @@ def lab(b,d,t,ag,title,out):
     pipe_page=ttk.Frame(settings,padding=6); quake_page=ttk.Frame(settings,padding=6)
     shape_page=ttk.Frame(settings,padding=6)
     settings.add(shape_page,text='모양')
-    shape_var=tk.StringVar(value=d.shape)
+    shape_var=tk.StringVar(value='U형' if d.shape=='V형' else d.shape)   # V형은 화면에서 'U형 + 기울기'
     ttk.Label(shape_page,text='관 모양').pack(anchor='w')
-    picker_shape=ttk.Combobox(shape_page,textvariable=shape_var,values=SHAPES,state='readonly',width=19)
+    shape_display=tk.StringVar(value=SHAPE_DISPLAY.get(shape_var.get(),shape_var.get()))
+    syncing=[False]
+    def display_to_shape(*_):
+        if syncing[0]:return
+        syncing[0]=True;shape_var.set(SHAPE_INTERNAL.get(shape_display.get(),shape_display.get()));syncing[0]=False
+    def shape_to_display(*_):
+        if syncing[0]:return
+        syncing[0]=True;shape_display.set(SHAPE_DISPLAY.get(shape_var.get(),shape_var.get()));syncing[0]=False
+    shape_display.trace_add('write',display_to_shape);shape_var.trace_add('write',shape_to_display)
+    picker_shape=ttk.Combobox(shape_page,textvariable=shape_display,values=[SHAPE_DISPLAY[x] for x in GUI_SHAPES],state='readonly',width=22)
     picker_shape.pack(fill='x')
-    tilt_var=tk.StringVar(value=str(d.tilt))
+    tilt_var=tk.StringVar(value=f'{d.tilt:g}')   # 기둥 기울기. 90=수직, 90 미만 바깥쪽, 90 초과 안쪽
     tr=ttk.Frame(shape_page);tr.pack(fill='x',pady=4)
-    ttk.Label(tr,text='V형 경사각 (°)').pack(side='left')
+    ttk.Label(tr,text='기둥 기울기 (°)').pack(side='left')
     ttk.Entry(tr,textvariable=tilt_var,width=7).pack(side='right')
+    tilt_hint=tk.StringVar()
+    def update_tilt_hint(*_):
+        where={'U형':'양쪽 기둥이','다기둥형':'양 끝 기둥만(가운데는 수직)','피자 거치대':'모든 기둥이'}.get(shape_var.get(),'기둥이')
+        tilt_hint.set(f'90=수직 · 90 미만=바깥쪽 · 90 초과=안쪽\n{where} 기울어집니다.')
+    update_tilt_hint();shape_var.trace_add('write',update_tilt_hint)
+    ttk.Label(shape_page,textvariable=tilt_hint,foreground='#30566a').pack(anchor='w')
     ttk.Label(shape_page,text='각 기둥 당 같은 질량으로 물 분배\n모양 비교 시 빈 관 질량도 고정합니다.').pack(anchor='w')
     column_var=tk.StringVar(value=str(d.columns))
     row=ttk.Frame(shape_page);row.pack(fill='x')
-    ttk.Label(row,text='다기둥형 기둥 수').pack(side='left')
+    ttk.Label(row,text='기둥 수 (일렬형 2~24 · 방사형 3~24)').pack(side='left')
     ttk.Spinbox(row,from_=2,to=24,width=4,textvariable=column_var).pack(side='right')
     leg_specs={d.shape:(d.bores,d.tops)}
     def edit_legs():
         shape=shape_var.get()
-        if shape not in ('U형','독립 U관 3개'):
-            messagebox.showinfo('기둥 설정','모양에서 U형 또는 독립 U관 3개를 선택하세요.');return
+        if shape!='U형':
+            messagebox.showinfo('기둥 설정','모양에서 U형을 선택하세요.');return
         window=tk.Toplevel(root);window.title(shape+' 기둥 설정')
         ttk.Label(window,text='안지름·전체 높이(cm) · 빈칸은 기본값\n높이는 바닥 관 중심부터 열린 끝까지입니다.').grid(row=0,column=0,columnspan=3)
         for i,label in enumerate(('위치','안지름','전체 높이')):
             ttk.Label(window,text=label).grid(row=1,column=i)
-        groups=['아래 왼쪽','아래 오른쪽','위'] if shape=='독립 U관 3개' else ['U관']
+        groups=['U관']
         specs=leg_specs.get(shape,((),()))
         entries=[[],[]]
         for i in range(2*len(groups)):
@@ -1790,11 +2209,17 @@ def lab(b,d,t,ag,title,out):
         ttk.Label(row,text=label).pack(side='left')
         entry=ttk.Entry(row,textvariable=var,width=11);entry.pack(side='right')
         frequency_widgets[label]=entry
+    # 원본 버그 수정: 예전에는 반복문 변수 entry를 썼는데, 뒤의 '가진' 탭 반복문이 같은 이름을 다시 써서
+    # 체크박스가 TLCD ω 칸 대신 진원 세기 칸을 열고 닫았다. TLCD 칸을 이름으로 직접 가리킨다.
+    tlcd_entry=frequency_widgets['TLCD ω (rad/s)']
+    def sync_tlcd_entry(*_):
+        tlcd_entry.state(['!readonly'] if tune_mode.get() else ['readonly'])
     def switch_tune():
-        entry.configure(state='normal' if tune_mode.get() else 'readonly')
+        sync_tlcd_entry()
         if not tune_mode.get(): preview_frequency()
     ttk.Checkbutton(freq_page,text='TLCD 목표값으로 물 높이 조절',variable=tune_mode,command=switch_tune).pack(anchor='w')
-    entry.configure(state='readonly')
+    tune_mode.trace_add('write',sync_tlcd_entry)   # 설정 불러오기처럼 체크 상태가 코드로 바뀔 때도 맞춘다.
+    sync_tlcd_entry()
     ttk.Label(freq_page,text='건물은 질량을 유지하고 강성을 조절합니다.\nTLCD는 바닥 관 길이를 유지합니다.').pack(anchor='w')
     floor_page=ttk.Frame(settings,padding=6)
     settings.add(floor_page,text='층별')
@@ -1895,7 +2320,8 @@ def lab(b,d,t,ag,title,out):
     precision_page=ttk.Frame(settings,padding=6);settings.add(precision_page,text='감쇠·램프')
     damping_mode_var=tk.StringVar(value=b.damping_mode)
     ttk.Label(precision_page,text='건물 감쇠 입력 방식').pack(anchor='w')
-    ttk.Combobox(precision_page,textvariable=damping_mode_var,values=['강성비례','직접 계수'],state='readonly').pack(fill='x')
+    ttk.Combobox(precision_page,textvariable=damping_mode_var,values=['강성비례','모드 감쇠','직접 계수'],state='readonly').pack(fill='x')
+    ttk.Label(precision_page,text='강성비례: 1차 모드만 정한 감쇠비, 높은 모드는 더 큼(층이 적을 때 적합)\n모드 감쇠: 모든 모드가 같은 감쇠비(층이 많은 건물에 권장)',wraplength=280,foreground='#30566a').pack(anchor='w')
     c_vars={}
     for key,label,initial in [('x','X 층간 c (N·s/m)',b.story_c),('y','Y 층간 c (빈칸=X)',b.story_cy)]:
         ttk.Label(precision_page,text=label).pack(anchor='w')
@@ -1970,9 +2396,8 @@ def lab(b,d,t,ag,title,out):
         shape=shape_var.get()
         meanings={'U형':'바닥 수평관 중심선 간 거리 B (cm)',
             'V형':'양쪽 경사관 하단 중심 간 거리 B (cm)',
-            '피자 거치대':'바닥 세 가지 중심선 길이 합 B (cm)',
-            '다기둥형':'첫·마지막 기둥 중심선 간 거리 B (cm)',
-            '독립 U관 3개':'세 U관의 수평 중심선 거리 합 B (cm)'}
+            '피자 거치대':'가운데~각 기둥 거리의 합 B (cm)',
+            '다기둥형':'양 끝 기둥 중심선 간 거리 B (cm)'}
         if 'B' in dimension_labels:dimension_labels['B'].set(meanings[shape])
         if 'h' in dimension_labels:dimension_labels['h'].set('수평관 중심선에서 정지 수면까지 h (cm)' if shape=='U형' else '기준 U형의 h · 물 총량 설정 기준 (cm)')
 
@@ -1997,7 +2422,7 @@ def lab(b,d,t,ag,title,out):
     ttk.Entry(pipe_page,textvariable=water_var,width=10).pack(anchor='w')
     ttk.Label(pipe_page,text='오리피스 손실만 근사 · 분기관 경험식 적용 불확실',wraplength=250).pack(anchor='w')
     air_mode_var=tk.StringVar(value=AIR_MODE_LABELS['stop'])
-    ttk.Label(pipe_page,text='물이 세로관을 다 빠져나갈 때 (U형)').pack(anchor='w')
+    ttk.Label(pipe_page,text='물이 세로관을 다 빠져나갈 때 (근사: U형·V형·비대칭 U형)').pack(anchor='w')
     ttk.Combobox(pipe_page,textvariable=air_mode_var,values=list(AIR_MODE_LABELS.values()),state='readonly',width=24).pack(anchor='w')
     container_mass_var=tk.StringVar(value=str(b.container_mass))
     ttk.Label(pipe_page,text='빈 관·부착물 질량 (kg, 실측값)').pack(anchor='w')
@@ -2019,7 +2444,7 @@ def lab(b,d,t,ag,title,out):
             height=(mass/(rho*np.pi*diameter**2/4)-width)/2
             if height<=0:raise ValueError('수직부에 남는 물이 없습니다.')
             bores,tops=leg_specs.get(shape_var.get(),((),()))
-            trial=replace(d,fluid_model=fluid_var.get(),density=rho,bores=bores,tops=tops,columns=int(column_var.get()),shape=shape_var.get(),
+            trial=replace(d,fluid_model=fluid_var.get(),density=rho,bores=bores,tops=tops,columns=int(column_var.get()),shape=internal_shape(shape_var.get(),float(tilt_var.get()),bores,tops),
                 B=width,h=height,diameter=diameter,tilt=float(tilt_var.get()))
             fields['h'].set(f'{height*100:.9g}')
             omega_l.set(f'{2*np.pi*trial.frequency:.9g}')
@@ -2037,6 +2462,8 @@ def lab(b,d,t,ag,title,out):
     update_dimension_labels()
     def change_shape(_):
         update_dimension_labels()
+        # 방사형(피자)은 기둥 3개 이상. 처음 고르면 기본 3기둥(기존 피자 거치대)으로 맞춘다.
+        if shape_var.get()=='피자 거치대' and current[0].shape!='피자 거치대':column_var.set('3')
         # 모양 전환은 마지막으로 적용한 물의 양을 기준으로 한다.
         previous=current[0]
         for key in ('B','h','diameter'):
@@ -2472,7 +2899,7 @@ def lab(b,d,t,ag,title,out):
             summary.set(f"관 없음 · 기준 실험\n최대 지붕 변위  {1000*np.max(np.abs(r['state'][:,0])):.2f} mm\n최대 절대가속도  {np.max(np.abs(r['acc'][:,2]))/G:.3f} g")
         elif m:
             a,_,z=m['peak_displacement_m']
-            summary.set(f'최대 변위 · 지진 방향\n{a*1000:.2f} → {z*1000:.2f} mm\n\n장치 없음 대비 저감률\n최대 변위  {pct(m["peak_reduction_vs_bare_pct"])}\nRMS 변위  {pct(m["rms_reduction_vs_bare_pct"])}\n가속도  {pct(m["acceleration_reduction_vs_bare_pct"])}\n\n{dam.shape} · 물 {dam.mass:.3f} kg\n관 포함 {dam.mass+b.container_mass:.3f} kg')
+            summary.set(f'최대 변위 · 지진 방향\n{a*1000:.2f} → {z*1000:.2f} mm\n\n장치 없음 대비 저감률\n최대 변위  {pct(m["peak_reduction_vs_bare_pct"])}\nRMS 변위  {pct(m["rms_reduction_vs_bare_pct"])}\n가속도  {pct(m["acceleration_reduction_vs_bare_pct"])}\n\n{shape_label(dam)} · 물 {dam.mass:.3f} kg\n관 포함 {dam.mass+b.container_mass:.3f} kg'+extent_text(dam))
         else:
             summary.set(r.get('failure_detail','수면 한계'))
             partial=partial_metrics(r)
@@ -2585,7 +3012,9 @@ def lab(b,d,t,ag,title,out):
             if vals['h']<=0:raise ValueError('물이 바닥 관을 채우기에 부족합니다. B를 줄이거나 물 질량을 늘리세요.')
             # 「U관 기둥별 안지름·높이」의 사용자 설정을 선택 형상의 관 정보에 합친다.
             bores,tops=leg_specs.get(shape_var.get(),((),()))
-            vals.update(leg_length=float(tube_length_var.get())/100 if tube_length_var.get().strip() else None,shape=shape_var.get(),tilt=float(tilt_var.get()),columns=int(column_var.get()),bores=bores,tops=tops)
+            tilt_value=float(tilt_var.get())
+            if not 0<tilt_value<180:raise ValueError('기둥 기울기는 0° 초과 180° 미만입니다(90°=수직, 90° 미만 바깥쪽, 90° 초과 안쪽).')
+            vals.update(leg_length=float(tube_length_var.get())/100 if tube_length_var.get().strip() else None,shape=internal_shape(shape_var.get(),tilt_value,bores,tops),tilt=tilt_value,columns=int(column_var.get()),bores=bores,tops=tops)
             if ratio_enabled.get():
                 ratio=float(tune_ratio.get())
                 if not np.isfinite(ratio) or ratio<=0:raise ValueError('조율비는 양수여야 합니다.')
@@ -2859,11 +3288,11 @@ def lab(b,d,t,ag,title,out):
         ttk.Checkbutton(body,text='전체 최적화 · 활성 변수 범위를 명시적으로 함께 탐색',variable=full).pack(anchor='w')
         ttk.Checkbutton(body,text='최대 변위 악화 설계는 최적 선정에서 제외',variable=peak_rule).pack(anchor='w')
         feedback=tk.StringVar();ttk.Label(body,textvariable=feedback,wraplength=1150).pack(fill='x')
-        columns=('amplitude_g','actual_peak_g','air_mode','beta','angle','B','r','n','mu_ref','flow_index','rms_pct','peak_pct','eligible','status','failure_time_s','completion_pct','internal_steps','fluid_scope','reason')
+        columns=('amplitude_g','actual_peak_g','air_mode','beta','angle','B','r','width_cm','height_cm','n','mu_ref','flow_index','rms_pct','peak_pct','eligible','status','failure_time_s','completion_pct','internal_steps','fluid_scope','reason')
         table_caption=tk.StringVar();ttk.Label(body,textvariable=table_caption,wraplength=1150).pack(fill='x')
         table_frame=ttk.Frame(body);table_frame.pack(fill='x')
         tree=ttk.Treeview(table_frame,columns=columns,show='headings',height=6)
-        for key,title in zip(columns,['입력 진폭(g)','실제 최대가속도(g)','수면 처리','β','θ (°)','B (m)','r','설치 층','μ_ref Pa·s','유동지수','RMS 저감 (%)','최대 저감 (%)','최적 선정 가능','상태','중단 시각 s','완료 %','내부 계산 단계','유체 모델 범위','원인']):
+        for key,title in zip(columns,['입력 진폭(g)','실제 최대가속도(g)','수면 처리','β','θ (°)','B (m)','r','장치 가로 (cm)','장치 높이 (cm)','설치 층','μ_ref Pa·s','유동지수','RMS 저감 (%)','최대 저감 (%)','최적 선정 가능','상태','중단 시각 s','완료 %','내부 계산 단계','유체 모델 범위','원인']):
             tree.heading(key,text=title);tree.column(key,width=100 if key!='reason' else 320,stretch=False)
         scroll=ttk.Scrollbar(table_frame,orient='horizontal',command=tree.xview)
         tree.configure(xscrollcommand=scroll.set);scroll.pack(side='bottom',fill='x');tree.pack(fill='x')
@@ -3244,10 +3673,9 @@ def lab(b,d,t,ag,title,out):
         name=(f"실험 {len(history)+1}  |  ω 건물 {2*math.pi*b.frequency:.2f} / 물 {2*math.pi*dam.frequency:.2f} rad/s  |  {excitation}"
               f"  ·  관 {m['heading_deg']:g}°"
               f"  ·  길이/물높이/지름 {dam.B*100:g}/{dam.h*100:g}/{dam.diameter*100:g} cm  ·  개구비 {dam.beta:g}")
-        mode=dam.shape if r.get('installed',True) else '관 없음'
+        mode=shape_label(dam) if r.get('installed',True) else '관 없음'
         if dam.fluid_model=='Power-law':mode+=f' · 가상 Power-law μ={dam.mu_ref:g}, 유동지수={dam.flow_index:g}, ρ={dam.rho:g}'
         if mode=='관 없음': name=f"실험 {len(history)+1} | {excitation} · 건물 {2*math.pi*b.frequency:.2f} rad/s"
-        if dam.shape=='다기둥형':mode+=f' {dam.columns}기둥'
         if dam.separate_u and r.get('installed',True):
             _,bores,_,_,tops=u_dimensions(dam)
             name+=' · 기둥 안지름/높이(cm) '+', '.join(f'{w*100:g}/{h*100:g}' for w,h in zip(bores,tops))
@@ -3404,7 +3832,134 @@ def lab(b,d,t,ag,title,out):
     ttk.Label(precision_page,textvariable=paper_mode).pack(anchor='w')
     ttk.Button(precision_page,text='Tanveer 2019 알려진 조건 적용',command=lambda:apply_tanveer()).pack(fill='x')
     ttk.Button(precision_page,text='사용자 실험으로 전환',command=lambda:paper_mode.set('사용자 실험')).pack(fill='x')
-    for label,cmd in [('조건 적용',calculate),('최적 설계 탐색',optimize),('현재 실험 담기',remember),('실험 그래프 비교',history_window),('각도별 그래프 비교',angle_window),('형상 × 각도 비교',compare),('결과 저장',save),('물과 지진 계산 원리',model_info)]:
+    def fair_window():
+        """공정 비교 창: 모양마다 r·β·B를 따로 최적화한 최선끼리 가진 4종·건물 ±10%로 비교한다."""
+        if not current[1].get('installed',True):
+            messagebox.showinfo('공정 비교','관을 설치한 상태에서 조건 적용 후 실행하세요.');return
+        import threading,csv
+        dam=current[0];model=b
+        win=tk.Toplevel(root);win.title('공정 비교 · 모양별 최적 설계 비교');win.geometry('1080x760')
+        top=ttk.Frame(win,padding=8);top.pack(fill='x')
+        ttk.Label(top,text='같은 건물·물 질량·손실·수면 처리·가진으로, 모양마다 조율비 r·개구비 β·수평 길이 B를 따로 최적화한 뒤 최선끼리 비교합니다.',wraplength=1040).grid(row=0,column=0,columnspan=8,sticky='w')
+        ttk.Label(top,text=f'고정 조건: 건물 1차 {tuning_frequency(model):.4g} Hz · 물 {dam.mass:.4g} kg · 손실 '+(f'직접 ξ {dam.xi:g}' if dam.xi is not None else f'β 탐색 + 추가 손실 {dam.pipe_loss:g}')+f' · 수면 처리 {air_mode_var.get()}',wraplength=1040,foreground='#30566a').grid(row=1,column=0,columnspan=8,sticky='w')
+        picks={};params={}
+        row=ttk.LabelFrame(top,text='비교할 모양 (U형은 기준으로 항상 포함)',padding=6);row.grid(row=2,column=0,columnspan=8,sticky='we',pady=4)
+        picks['U형']=tk.BooleanVar(value=True)
+        ttk.Checkbutton(row,text='U형 (기준)',variable=picks['U형'],state='disabled').pack(side='left',padx=4)
+        for key,label,extra in [('기울인 U형','기울인 U형  기울기° (90 초과=안쪽)','60'),('다기둥형','일렬형  기둥 수','3'),('피자 거치대','방사형(피자)  기둥 수','3'),('비대칭 U형','비대칭 U형  지름비','1.4')]:
+            picks[key]=tk.BooleanVar(value=key in ('기울인 U형','다기둥형','비대칭 U형'))
+            ttk.Checkbutton(row,text=label,variable=picks[key]).pack(side='left',padx=(10,2))
+            if extra is not None:
+                params[key]=tk.StringVar(value=extra);ttk.Entry(row,textvariable=params[key],width=5).pack(side='left')
+        grid=ttk.Frame(top);grid.grid(row=3,column=0,columnspan=8,sticky='w',pady=4)
+        wave_var=tk.StringVar(value='엘센트로 지진');metric_var=tk.StringVar(value='RMS 변위 저감')
+        ttk.Label(grid,text='최적화 가진').grid(row=0,column=0,sticky='w')
+        ttk.Combobox(grid,textvariable=wave_var,values=list(FAIR_EXCITATIONS),state='readonly',width=14).grid(row=0,column=1,padx=4)
+        ttk.Label(grid,text='선정 기준').grid(row=0,column=2,sticky='w')
+        ttk.Combobox(grid,textvariable=metric_var,values=['RMS 변위 저감','최대 변위 저감'],state='readonly',width=14).grid(row=0,column=3,padx=4)
+        ranges={}
+        for i,(key,label,values) in enumerate([('r','조율비 r (시작·끝·간격)',('0.90','1.04','0.02')),('beta','개구비 β (시작·끝·간격)',('0.2','1.0','0.1'))]):
+            ttk.Label(grid,text=label).grid(row=1+i,column=0,columnspan=2,sticky='w')
+            ranges[key]=[tk.StringVar(value=v) for v in values]
+            for j,var in enumerate(ranges[key]):ttk.Entry(grid,textvariable=var,width=7).grid(row=1+i,column=2+j,padx=2)
+        if dam.xi is not None:
+            ttk.Label(grid,text='직접 ξ 모드: β는 탐색하지 않습니다.',foreground='#a33').grid(row=2,column=5,sticky='w')
+        lengths_var=tk.StringVar(value=', '.join(f'{dam.B*100*x:.3g}' for x in (.8,1.,1.2)))
+        ttk.Label(grid,text='수평 길이 B 후보 (cm, 쉼표)').grid(row=3,column=0,columnspan=2,sticky='w')
+        ttk.Entry(grid,textvariable=lengths_var,width=24).grid(row=3,column=2,columnspan=3,sticky='w',padx=2)
+        height_var=tk.StringVar(value='');amp_var=tk.StringVar(value='0.01');all_var=tk.BooleanVar(value=True)
+        ttk.Label(grid,text='관 높이 제한 (cm, 빈칸=없음)').grid(row=4,column=0,columnspan=2,sticky='w')
+        ttk.Entry(grid,textvariable=height_var,width=7).grid(row=4,column=2,padx=2)
+        ttk.Label(grid,text='공진 사인 진폭 (g)').grid(row=4,column=3,columnspan=2,sticky='e')
+        ttk.Entry(grid,textvariable=amp_var,width=7).grid(row=4,column=5,padx=2)
+        ttk.Checkbutton(grid,text='가진 4종을 모두 끝까지 견디는 설계만 선정 (권장)',variable=all_var).grid(row=5,column=0,columnspan=6,sticky='w')
+        estimate=tk.StringVar();ttk.Label(top,textvariable=estimate,foreground='#30566a').grid(row=4,column=0,columnspan=8,sticky='w')
+        def span(values):
+            lo,hi,step=[float(v.get()) for v in values]
+            if not all(math.isfinite(x) for x in (lo,hi,step)) or step<=0 or hi<lo:raise ValueError('범위는 시작 ≤ 끝, 간격 > 0으로 입력하세요.')
+            count=int(math.floor((hi-lo)/step+1e-9))+1
+            if count>200:raise ValueError('한 변수의 후보가 200개를 넘습니다. 간격을 늘리세요.')
+            return [round(lo+i*step,10) for i in range(count)]
+        def collect():
+            ratios=span(ranges['r']);betas=[dam.beta] if dam.xi is not None else span(ranges['beta'])
+            if any(x<=0 or x>1 for x in betas):raise ValueError('β는 0 초과 1 이하입니다.')
+            lengths=[float(x)/100 for x in lengths_var.get().replace(' ','').split(',') if x]
+            if not lengths or any(not math.isfinite(x) or x<=0 for x in lengths):raise ValueError('B 후보를 양수(cm)로 입력하세요.')
+            cands=[]
+            for key in ('U형','기울인 U형','다기둥형','피자 거치대','비대칭 U형'):
+                if not picks[key].get():continue
+                p={}
+                if key=='기울인 U형':p['tilt']=float(params[key].get())
+                if key in ('다기둥형','피자 거치대'):p['columns']=int(float(params[key].get()))
+                if key=='비대칭 U형':p['bore_ratio']=float(params[key].get())
+                fair_candidate(dam,key,**p)
+                cands.append((fair_label(key,**p),key,p))
+            mh=float(height_var.get())/100 if height_var.get().strip() else None
+            if mh is not None and not mh>0:raise ValueError('높이 제한은 양수(cm)입니다.')
+            amp=float(amp_var.get())
+            if not amp>0:raise ValueError('공진 사인 진폭은 양수(g)입니다.')
+            return cands,ratios,betas,lengths,mh,amp
+        def update_estimate(*_):
+            try:
+                cands,ratios,betas,lengths,_,_=collect()
+                per=len(ratios)*len(betas)*len(lengths)
+                seconds=sum(per*(.15 if k in ('U형','기울인 U형','비대칭 U형') else 1.)+12*(1 if k in ('U형','기울인 U형','비대칭 U형') else 6) for _,k,_ in cands)
+                estimate.set(f'후보 {len(cands)}개 × 설계 {per}개 = {len(cands)*per}개 계산 · 예상 약 {max(1,round(seconds/60))}분 (컴퓨터에 따라 0.5~2배)')
+            except (ValueError,TypeError) as error:estimate.set(f'입력 확인: {error}')
+        for var in [lengths_var,height_var,amp_var,*ranges['r'],*ranges['beta'],*params.values()]:var.trace_add('write',update_estimate)
+        for var in picks.values():var.trace_add('write',update_estimate)
+        update_estimate()
+        buttons=ttk.Frame(top);buttons.grid(row=5,column=0,columnspan=8,sticky='w',pady=4)
+        status_var=tk.StringVar(value='[비교 실행]을 누르세요.')
+        text=tk.Text(win,wrap='none',font=('Consolas',10));scroll=ttk.Scrollbar(win,orient='vertical',command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        ttk.Label(win,textvariable=status_var,wraplength=1040).pack(anchor='w',padx=8)
+        scroll.pack(side='right',fill='y');text.pack(fill='both',expand=True,padx=8,pady=(0,8))
+        state={'job':None,'stop':None,'results':None,'settings':None,'progress':{}}
+        def run():
+            if state['job'] is not None and not state['job'].done():return
+            try:cands,ratios,betas,lengths,mh,amp=collect()
+            except (ValueError,TypeError) as error:messagebox.showerror('공정 비교',str(error),parent=win);return
+            air=AIR_MODE_KEYS.get(air_mode_var.get(),'stop')
+            if air=='off':messagebox.showerror('공정 비교','수면 처리 "판정 끔"은 참고 계산이라 최적 선정에 쓸 수 없습니다. 정밀 또는 근사를 고르세요.',parent=win);return
+            metric='rms' if metric_var.get().startswith('RMS') else 'peak'
+            state['stop']=threading.Event();state['progress']=progress={}
+            state['settings']=dict(optimize_on=wave_var.get(),metric=metric,air_mode=air,max_height=mh,building_hz=tuning_frequency(model),
+                water_kg=dam.mass,loss_text=(f'직접 ξ {dam.xi:g}' if dam.xi is not None else f'β 탐색 + 추가 손실 {dam.pipe_loss:g}'),sine_amplitude_g=amp)
+            state['job']=pool.submit(fair_comparison,model,dam,cands,wave_var.get(),ratios,betas,lengths,air,metric,mh,amp,progress,state['stop'],all_var.get())
+            text.delete('1.0','end');poll()
+        def poll():
+            job=state['job'];p=state['progress']
+            if not job.done():
+                status_var.set(f"계산 중… 후보 {p.get('candidate','-')}/{p.get('candidates','-')} {p.get('label','')} · 탐색 {p.get('completed',0)}/{p.get('total',0)}"
+                               +(' · 중지 요청됨(현재 설계 끝나면 멈춤)' if state['stop'].is_set() else ''))
+                win.after(300,poll);return
+            try:state['results']=job.result()
+            except Exception as error:status_var.set(f'계산 실패: {error}');return
+            text.delete('1.0','end');text.insert('end',fair_report_text(state['results'],state['settings']))
+            status_var.set('완료' if not state['stop'].is_set() else '중지됨 · 끝난 후보까지만 표시')
+        def stop():
+            if state['stop'] is not None:state['stop'].set()
+        def save():
+            if not state['results']:messagebox.showinfo('공정 비교','먼저 비교를 실행하세요.',parent=win);return
+            path=filedialog.asksaveasfilename(parent=win,defaultextension='.csv',filetypes=[('CSV','*.csv')],initialfile='공정비교.csv')
+            if not path:return
+            with open(path,'w',newline='',encoding='utf-8-sig') as file:
+                w=csv.writer(file)
+                w.writerow(['모양','가진','최대변위저감%','RMS저감%','가속도저감%','물최대cm','물여유%','r','beta','B_cm','h_cm','안지름_cm','높이_cm','물_kg','손실계수','비고'])
+                for r in state['results']:
+                    bst=r['best'] or {}
+                    base=[bst.get('r'),bst.get('beta'),bst.get('B',0)*100 if bst else None,bst.get('h',0)*100 if bst else None,
+                          bst.get('diameter',0)*100 if bst else None,bst.get('height',0)*100 if bst else None,bst.get('mass'),bst.get('loss')]
+                    if not r['best']:w.writerow([r['label'],'','','','','','',*base,r['note']]);continue
+                    for name,s in list(r['scores'].items())+[(f'건물 {int(round((k-1)*100)):+d}% 공진',v) for k,v in r['robust'].items()]:
+                        w.writerow([r['label'],name,s['peak'],s['rms'],s['acc'],s['water_cm'],s['margin'],*base,s['note']])
+            with open(Path(path).with_suffix('.txt'),'w',encoding='utf-8') as file:file.write(fair_report_text(state['results'],state['settings']))
+            status_var.set(f'저장 완료: {path} (+ 같은 이름 .txt)')
+        ttk.Button(buttons,text='비교 실행',command=run).pack(side='left')
+        ttk.Button(buttons,text='중지',command=stop).pack(side='left',padx=6)
+        ttk.Button(buttons,text='결과 저장 (CSV·TXT)',command=save).pack(side='left')
+    for label,cmd in [('조건 적용',calculate),('최적 설계 탐색',optimize),('공정 비교 (모양별)',fair_window),('현재 실험 담기',remember),('실험 그래프 비교',history_window),('각도별 그래프 비교',angle_window),('형상 × 각도 비교',compare),('결과 저장',save),('물과 지진 계산 원리',model_info)]:
         parent=quick_actions if label in ('조건 적용','최적 설계 탐색','실험 그래프 비교') else panel
         ttk.Button(parent,text=label,command=cmd).pack(fill='x',pady=3)
     ttk.Separator(panel).pack(fill='x',pady=12)
@@ -3441,14 +3996,14 @@ def lab(b,d,t,ag,title,out):
         installed=pipe_on.get();shape=shape_var.get();laboratory=kind_var.get()=='단방향'
         target=tune_mode.get()
         states={str(mu_var):installed and fluid_var.get()=='Power-law' and not (loss_mode_var.get()=='직접 ξ' and xi_scope_var.get()=='total'),str(index_var):installed and fluid_var.get()=='Power-law' and not (loss_mode_var.get()=='직접 ξ' and xi_scope_var.get()=='total'),str(density_var):installed and fluid_var.get()=='Power-law',
-            str(fluid_var):installed,str(damping_var):damping_mode_var.get()=='강성비례',
+            str(fluid_var):installed,str(damping_var):damping_mode_var.get() in ('강성비례','모드 감쇠'),
             str(c_vars['x']):damping_mode_var.get()=='직접 계수',str(c_vars['y']):damping_mode_var.get()=='직접 계수',
             str(xi_var):installed and loss_mode_var.get()=='직접 ξ',
-            str(tilt_var):installed and shape=='V형',
-            str(column_var):installed and shape=='다기둥형',
+            str(tilt_var):installed,
+            str(column_var):installed and shape in ('다기둥형','피자 거치대'),
             str(cycles_var):laboratory,str(hz_var):laboratory,str(amplitude_var):laboratory,str(amplitude_mode):laboratory,
             str(mount_var):installed,str(tune_mode):installed,
-            str(ramp_profile_var):laboratory,str(container_mass_var):installed,str(air_mode_var):installed and shape=='U형',str(shape_var):installed,str(water_var):installed,str(tube_length_var):installed,
+            str(ramp_profile_var):laboratory,str(container_mass_var):installed,str(air_mode_var):installed and (shape=='U형' or (shape=='다기둥형' and column_var.get().strip()=='2')),str(shape_display):installed,str(water_var):installed,str(tube_length_var):installed,
             str(omega_b):stiffness_mode.get()=='목표 X 1차 진동수',
             str(omega_l):installed and target,
             str(floor_fields['m']):not size_link.get()}
@@ -3476,7 +4031,7 @@ def lab(b,d,t,ag,title,out):
                     elif isinstance(widget,ttk.Spinbox):widget.configure(style='Context.TSpinbox')
                     elif isinstance(widget,ttk.Entry):widget.configure(style='Context.TEntry')
                 if isinstance(widget,ttk.Button) and widget.cget('text')=='U관 기둥별 안지름 · 높이':
-                    widget.state(['!disabled'] if installed and shape in ('U형','독립 U관 3개') else ['disabled'])
+                    widget.state(['!disabled'] if installed and shape=='U형' else ['disabled'])
                 visit(widget)
         visit(settings)
         notes=['회색 = 현재 미사용/자동 계산. h는 물 질량·B·안지름으로 계산합니다.']
@@ -3512,6 +4067,7 @@ def lab(b,d,t,ag,title,out):
         data=dict(values={k:v.get() for k,v in variables.items()},
             groups={name:{k:v.get() for k,v in group.items()} for name,group in variable_groups.items()},
             legs=leg_specs,reference_size=[reference_size[0],reference_size[1],reference_size[2].tolist()])
+        data['values']['tilt_version']='3'   # 기울기 칸이 모든 모양의 기둥 기울기(90=수직, 90 초과 안쪽)인 저장 형식
         # 사용자가 불러온 별도 입력 기록은 재실행 후에도 복원할 수 있도록 배열을 함께 저장한다.
         if kind_var.get() not in QUAKE_NOTES:
             time_input,acc_input=wave_cache[kind_var.get()]
@@ -3550,6 +4106,15 @@ def lab(b,d,t,ag,title,out):
             # 알고 있는 키만 위젯 변수에 복원한다. 오래된 설정에 없는 입력은 현재 기본값을 유지한다.
             for key,value in values.items():
                 if key in variables:variables[key].set(value)
+            # 예전 설정: V형은 U형 + 기둥 기울기로, 그 밖의 형상은 V형 전용이던 경사각을 무시하고 수직(90°)으로 불러온다.
+            if values.get('tilt_version') not in ('2','3') and values.get('shape')!='V형':tilt_var.set('90')
+            # v19 이전: 기울기는 U형에만 쓰였다. 다른 모양은 수직, 피자 거치대는 3기둥으로 불러온다.
+            if values.get('tilt_version') in (None,'2') and values.get('shape') not in ('U형','V형'):tilt_var.set('90')
+            if values.get('tilt_version') in (None,'2') and values.get('shape')=='피자 거치대':column_var.set('3')
+            if shape_var.get()=='V형':shape_var.set('U형')
+            if shape_var.get()=='독립 U관 3개':
+                shape_var.set('U형');tilt_var.set('90')
+                messagebox.showinfo('설정 불러오기','독립 U관 3개는 v19에서 빠졌습니다. U형으로 불러왔습니다.')
             # 첨부 파일의 이전 공통 램프 주기를 시작·종료 램프 설정으로 변환한다.
             if 'ramp' in values and not any(key in values for key in ('start_ramp_on','end_ramp_on')):
                 amount=float(values['ramp'])
@@ -3599,7 +4164,7 @@ def lab(b,d,t,ag,title,out):
     def load_stable_example():
         eb,ed=stable_example()
         data=snapshot()
-        data['values'].update(shape='U형',tilt='60',columns='4',count='2',mount='2',damping=str(eb.damping),
+        data['values'].update(shape='U형',tilt='90',columns='4',count='2',mount='2',damping=str(eb.damping),
             width='56',depth='44',size_link=False,stiffness_mode='직접 입력',water_mass=str(ed.mass),
             wave='단방향',hz=f'{eb.frequency:.2f}',amplitude_mode='가속도 진폭 (g)',amplitude='0.01',
             tune=False,ratio_enabled=False,pipe_on=True,tube_length='',cycles='39',container_mass='0',ramp_profile='quintic',
@@ -3637,7 +4202,7 @@ def lab(b,d,t,ag,title,out):
     analysis_menu=tk.Menu(menu,tearoff=False)
     for label,command in [('최적 설계 탐색',optimize),('실험 그래프 비교',history_window),
             ('각도별 그래프 비교',angle_window),('형상 × 각도 비교',compare),
-            ('주 실험실 주파수 응답',frequency_window),('층별 가속도 표',acceleration_window)]:
+            ('주 실험실 주파수 응답',frequency_window),('층별 가속도 표',acceleration_window),('공정 비교 (모양별)',fair_window)]:
         analysis_menu.add_command(label=label,command=command)
     menu.add_cascade(label='분석',menu=analysis_menu);root.configure(menu=menu)
     if saved.get('last'):root.after(100,lambda:restore(saved['last']))
