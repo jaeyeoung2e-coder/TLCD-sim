@@ -175,7 +175,7 @@ class Damper:
     angle: float = 0.0       # 지진 방향과 관의 수평축 사이 각도 [도]
     # 논문 TLCBD의 c_L=2*m_l*xi_l*omega_d는 선형 감쇠 정의이므로 이 xi로 자동 변환하지 않는다.
     fluid_model: str = '물'
-    mu_ref: float = .01  # Pa·s, 기준 전단률 1 s^-1에서의 점도
+    mu_ref: float = .001  # Pa·s, 기준 전단률 1 s^-1에서의 점도
     flow_index: float = 1.  # power-law n. 설치 층 n과 다른 변수
     density: float = 1000.  # Power-law 밀도 kg/m³. 물은 기존 1000 유지
     xi: float | None = None  # None이면 beta 경험식, 수치면 관 평균속도 기준 비선형 손실계수
@@ -1500,19 +1500,43 @@ def lab(b,d,t,ag,title,out):
     root.title('TLCD 실험실')
     root.geometry('1070x745')
     root.minsize(830,620)
-    sidebar=ttk.Frame(root);sidebar.pack(side='left',fill='y')
-    sidebar_canvas=tk.Canvas(sidebar,highlightthickness=0,width=460)
+    # 왼쪽 폭을 메시지 길이와 분리한다. 긴 설정·오류는 세로로 늘어나며 스크롤한다.
+    sidebar=ttk.Frame(root,width=460);sidebar.pack(side='left',fill='y')
+    sidebar.pack_propagate(False)
+    sidebar_canvas=tk.Canvas(sidebar,highlightthickness=0,width=440)
     sidebar_scroll=ttk.Scrollbar(sidebar,orient='vertical',command=sidebar_canvas.yview)
-    sidebar_scroll.pack(side='right',fill='y');sidebar_canvas.pack(side='left',fill='y',expand=True)
+    sidebar_scroll.pack(side='right',fill='y');sidebar_canvas.pack(side='left',fill='both',expand=True)
     sidebar_canvas.configure(yscrollcommand=sidebar_scroll.set)
     panel=ttk.Frame(sidebar_canvas,padding=14)
     sidebar_window=sidebar_canvas.create_window((0,0),window=panel,anchor='nw')
+    layout_state={'pending':None,'width':None}
     def resize_sidebar(*_):
+        # 입력값·오류가 길어도 왼쪽 폭은 창 너비만을 기준으로 결정한다.
+        available=max(360,min(480,int(root.winfo_width()*.43)))
+        sidebar.configure(width=available)
+        viewport=max(1,available-sidebar_scroll.winfo_reqwidth())
+        if layout_state['width']!=viewport:
+            layout_state['width']=viewport
+            sidebar_canvas.itemconfigure(sidebar_window,width=viewport)
+            def wrap_labels(parent):
+                for child in parent.winfo_children():
+                    if isinstance(child,ttk.Label):
+                        siblings=child.master.winfo_children()
+                        entries=[w for w in siblings if isinstance(w,(ttk.Entry,ttk.Spinbox))]
+                        # 같은 가로 행의 입력칸 공간을 먼저 확보하고 긴 왼쪽 라벨을 줄바꿈한다.
+                        row_label=child.pack_info().get('side')=='left' if child.winfo_manager()=='pack' else False
+                        reserve=max((w.winfo_reqwidth() for w in entries),default=0) if row_label else 0
+                        child.configure(wraplength=max(45 if reserve else 100,viewport-55-reserve))
+                    wrap_labels(child)
+            wrap_labels(panel)
         sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox('all'))
-        available=max(300,min(560,int(root.winfo_width()*.52)))
-        sidebar_canvas.configure(width=min(panel.winfo_reqwidth(),available))
-    panel.bind('<Configure>',resize_sidebar)
-    root.bind('<Configure>',lambda event:resize_sidebar() if event.widget is root else None,add='+')
+        layout_state['pending']=None
+    def queue_sidebar_resize(event=None):
+        if event is not None and event.widget not in (root,panel,sidebar_canvas):return
+        if layout_state['pending'] is None:layout_state['pending']=root.after_idle(resize_sidebar)
+    panel.bind('<Configure>',queue_sidebar_resize)
+    sidebar_canvas.bind('<Configure>',queue_sidebar_resize)
+    root.bind('<Configure>',queue_sidebar_resize,add='+')
     def scroll_sidebar(event):
         widget=event.widget
         if isinstance(widget,(ttk.Combobox,ttk.Spinbox)):return
@@ -1525,7 +1549,8 @@ def lab(b,d,t,ag,title,out):
     body.pack(side='left',fill='both',expand=True)
     ttk.Label(panel,text='TLCD 실험실',font=('Malgun Gothic',17,'bold')).pack(anchor='w')
     quick_actions=ttk.Frame(panel);quick_actions.pack(fill='x',pady=(4,8))
-    settings=ttk.Notebook(panel);settings.pack(fill='x',pady=6)
+    ttk.Style(root).configure('Sidebar.TNotebook.Tab',padding=(4,3))
+    settings=ttk.Notebook(panel,style='Sidebar.TNotebook');settings.pack(fill='x',pady=6)
     pipe_page=ttk.Frame(settings,padding=6); quake_page=ttk.Frame(settings,padding=6)
     shape_page=ttk.Frame(settings,padding=6)
     settings.add(shape_page,text='모양')
@@ -1569,9 +1594,9 @@ def lab(b,d,t,ag,title,out):
             window.destroy();calculate()
         ttk.Button(window,text='적용',command=accept).grid(row=2+2*len(groups),column=0,columnspan=3)
     ttk.Button(shape_page,text='U관 기둥별 안지름 · 높이',command=edit_legs).pack(fill='x')
-    settings.add(pipe_page,text='관 설정');settings.add(quake_page,text='가진 입력')
+    settings.add(pipe_page,text='관 설정');settings.add(quake_page,text='가진')
     freq_page=ttk.Frame(settings,padding=6)
-    settings.add(freq_page,text='각진동수')
+    settings.add(freq_page,text='진동수')
     omega_b=tk.StringVar(value=f'{2*math.pi*b.frequency:.9g}')
     omega_l=tk.StringVar(value=f'{2*math.pi*d.frequency:.9g}')
     tune_mode=tk.BooleanVar(value=False)
@@ -1588,7 +1613,7 @@ def lab(b,d,t,ag,title,out):
     entry.configure(state='readonly')
     ttk.Label(freq_page,text='건물은 질량을 유지하고 강성을 조절합니다.\nTLCD는 바닥 관 길이를 유지합니다.').pack(anchor='w')
     floor_page=ttk.Frame(settings,padding=6)
-    settings.add(floor_page,text='층별 해석')
+    settings.add(floor_page,text='층별')
     masses0,ks0,hs0,mount0=b.floor_data()
     floor_fields={}
     reference_size=(b.width,b.depth,masses0.copy())
@@ -1829,7 +1854,9 @@ def lab(b,d,t,ag,title,out):
     status=tk.StringVar()
     summary=tk.StringVar()
     source=tk.StringVar(value=title)
-    ttk.Label(body,textvariable=source).pack(anchor='w')
+    source_label=ttk.Label(body,textvariable=source,wraplength=500)
+    source_label.pack(anchor='w',fill='x')
+    body.bind('<Configure>',lambda event:source_label.configure(wraplength=max(120,event.width-20)),add='+')
     mode_bar=ttk.Frame(body)
     mode_bar.pack(fill='x',pady=(3,4))
     ttk.Label(mode_bar,text='지붕 장치',font=('Malgun Gothic',10,'bold')).pack(side='left',padx=(0,8))
@@ -3167,7 +3194,7 @@ def lab(b,d,t,ag,title,out):
         parent=quick_actions if label in ('조건 적용','최적 설계 탐색','실험 그래프 비교') else panel
         ttk.Button(parent,text=label,command=cmd).pack(fill='x',pady=3)
     ttk.Separator(panel).pack(fill='x',pady=12)
-    ttk.Label(panel,textvariable=summary,justify='left').pack(anchor='w')
+    ttk.Label(panel,textvariable=summary,justify='left',wraplength=380).pack(anchor='w')
     ttk.Label(panel,textvariable=status,wraplength=205,foreground='#215a72').pack(anchor='w',pady=12)
     play.configure(command=toggle)
     scrub.configure(command=lambda _:draw_scene())
@@ -3302,7 +3329,7 @@ def lab(b,d,t,ag,title,out):
                 kind_box.configure(values=list(presets))
             # 진폭 항목이 없는 예전 설정에도 실행용 기본값을 적용한다.
             amplitude_mode.set('가속도 진폭 (g)');amplitude_var.set('0.01')
-            fluid_var.set('물');mu_var.set('.01');index_var.set('1');density_var.set('1000')
+            fluid_var.set('물');mu_var.set('.001');index_var.set('1');density_var.set('1000')
             tube_length_var.set('');cycles_var.set('');container_mass_var.set('0');ramp_profile_var.set('quintic')
             # 알고 있는 키만 위젯 변수에 복원한다. 오래된 설정에 없는 입력은 현재 기본값을 유지한다.
             for key,value in values.items():
@@ -3995,3 +4022,5 @@ def main():
 
 if __name__=='__main__':
     main()
+
+
